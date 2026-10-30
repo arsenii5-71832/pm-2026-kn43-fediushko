@@ -4,3 +4,4 @@ ST-02,Адміністратор системи автентифікації а�
 ST-03,Студентське самоврядування,студенти,high,low,supporter,keep_informed,PM
 ST-04,Старости академічних груп,студенти,high,low,blocker,keep_informed,PM
 ST-05,Адміністратор вивантаження розкладу,навчальна частина,low,low,neutral,monitor,Dev
+ST-06,Служба інформаційної безпеки академії,служба безпеки,high,high,neutral,manage_closely,PM

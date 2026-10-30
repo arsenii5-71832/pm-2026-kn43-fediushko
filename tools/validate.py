@@ -1755,6 +1755,362 @@ def validate_review(target_dir):
         return 0
 
 
+def validate_risks_quality(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    risks_path = os.path.join(target_dir, "risks.csv")
+    techdebt_path = os.path.join(target_dir, "techdebt.csv")
+    changelog_path = os.path.join(target_dir, "changelog.csv")
+    dod_path = os.path.join(target_dir, "dod.md")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    # 1. Перевірка наявності файлів
+    for p, name in [
+        (risks_path, "risks.csv"),
+        (techdebt_path, "techdebt.csv"),
+        (changelog_path, "changelog.csv"),
+        (dod_path, "dod.md"),
+        (readme_path, "README.md")
+    ]:
+        if not os.path.isfile(p):
+            errors.append(f"Файл {p} не знайдено.")
+        else:
+            successes.append(f"Файл {name} знайдено в {target_dir}")
+
+    # Отримання списку історій із беклогу для перевірки X-1
+    existing_story_ids = set()
+    backlog_path = os.path.join("lr06_backlog", "backlog.csv")
+    if os.path.isfile(backlog_path):
+        try:
+            with open(backlog_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if row:
+                        existing_story_ids.add(row[0].strip())
+        except Exception:
+            pass
+
+    # 2. Перевірка risks.csv
+    if os.path.isfile(risks_path):
+        try:
+            with open(risks_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = [
+                    "risk_id", "category", "cause", "event", "consequence",
+                    "probability", "impact", "score", "strategy", "owner",
+                    "trigger", "response_plan", "status", "review_date",
+                    "previous_score", "review_note", "related_story_ids"
+                ]
+                if header != expected_header:
+                    errors.append(f"RK-1: Неправильний заголовок risks.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("RK-1: Заголовок risks.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 6:
+                    errors.append(f"RK-1: risks.csv має містити щонайменше 6 ризиків (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"RK-1: Знайдено {len(rows)} ризиків (>= 6).")
+
+                categories = set()
+                changed_scores_count = 0
+                has_course_event_risk = False
+                valid_strategies = {"avoid", "mitigate", "transfer", "accept", "escalate"}
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 17:
+                        errors.append(f"risks.csv рядок {i}: очікується 17 колонок, отримано {len(r)}.")
+                        continue
+
+                    (rid, cat, cause, event, cons, prob_s, imp_s, score_s,
+                     strat, owner, trig, resp_plan, status, rdate, prev_score_s,
+                     rnote, rel_stories) = [c.strip() for c in r]
+
+                    categories.add(cat)
+
+                    # RK-1: probability, impact, score
+                    try:
+                        p_val = int(prob_s)
+                        i_val = int(imp_s)
+                        s_val = int(score_s)
+                        if not (1 <= p_val <= 5) or not (1 <= i_val <= 5):
+                            errors.append(f"RK-1 рядок {i}: probability ({p_val}) та impact ({i_val}) мають бути в діапазоні 1..5.")
+                        if s_val != p_val * i_val:
+                            errors.append(f"RK-1 рядок {i}: score ({s_val}) != probability * impact ({p_val * i_val}).")
+                    except ValueError:
+                        errors.append(f"RK-1 рядок {i}: probability, impact або score не є цілими числами.")
+                        s_val = 0
+
+                    # RK-3: owner
+                    if owner.lower() in ["команда", "всі", "all", "team"]:
+                        errors.append(f"RK-3 рядок {i}: owner не може бути абстрактним ('{owner}').")
+
+                    # strategy
+                    if strat.lower() not in valid_strategies:
+                        errors.append(f"RK-1 рядок {i}: невідома стратегія '{strat}' (очікується {valid_strategies}).")
+
+                    # RK-4: план для червоної зони (score >= 15)
+                    if s_val >= 15:
+                        resp_lower = resp_plan.lower()
+                        if "крок 1" not in resp_lower and "step 1" not in resp_lower:
+                            errors.append(f"RK-4 рядок {i} ({rid}): для ризику червоної зони (score={s_val}) план має бути покроковим ('Крок 1 ...').")
+
+                    # RK-5, RK-6, X-15: review_date, previous_score, review_note
+                    if rdate != "2026-11-12":
+                        errors.append(f"X-15 рядок {i}: review_date '{rdate}' має бути '2026-11-12'.")
+
+                    if prev_score_s:
+                        try:
+                            prev_val = int(prev_score_s)
+                            if prev_val != s_val:
+                                if not rnote:
+                                    errors.append(f"RK-6 рядок {i} ({rid}): змінено оцінку (було {prev_val}, стало {s_val}), але review_note порожній.")
+                                else:
+                                    changed_scores_count += 1
+                        except ValueError:
+                            errors.append(f"risks.csv рядок {i}: previous_score '{prev_score_s}' не є числом.")
+
+                    # X-1: зв'язок з беклогом
+                    story_refs = [s.strip() for s in rel_stories.split(";") if s.strip()]
+                    if not story_refs:
+                        warnings.append(f"risks.csv рядок {i} ({rid}): бажано вказати related_story_ids.")
+                    else:
+                        for sref in story_refs:
+                            if existing_story_ids and sref not in existing_story_ids:
+                                errors.append(f"X-1 рядок {i} ({rid}): історія '{sref}' відсутня у беклозі.")
+
+                    if rid == "R-01" or "безпек" in cause.lower() or "oauth" in event.lower() or "персональн" in cause.lower():
+                        has_course_event_risk = True
+
+                expected_cats = {"technical", "external", "organizational", "project_management"}
+                if not expected_cats.issubset(categories):
+                    errors.append(f"RK-2: Мають бути представлені всі 4 категорії ризиків. Відсутні: {expected_cats - categories}")
+                else:
+                    successes.append("RK-2: Усі 4 обов'язкові категорії ризиків присутні.")
+
+                if changed_scores_count < 2:
+                    errors.append(f"RK-5: Щонайменше для 2 ризиків має бути зафіксована зміна score (знайдено {changed_scores_count}).")
+                else:
+                    successes.append(f"RK-5: Знайдено {changed_scores_count} ризиків зі зміненими оцінками та заповненими review_note (>= 2).")
+
+                if not has_course_event_risk:
+                    warnings.append("RK-1: Бажано явно вказати ризик, породжений подією курсу (R-01 про вимоги безпеки).")
+                else:
+                    successes.append("RK-1: Присутній ризик, породжений подією курсу.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні risks.csv: {e}")
+
+    # 3. Перевірка techdebt.csv
+    if os.path.isfile(techdebt_path):
+        try:
+            with open(techdebt_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = [
+                    "debt_id", "area", "description", "type", "origin",
+                    "impact", "effort_hours", "decision", "plan", "owner", "due_sprint"
+                ]
+                if header != expected_header:
+                    errors.append(f"TD-1: Неправильний заголовок techdebt.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("TD-1: Заголовок techdebt.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 3:
+                    errors.append(f"TD-1: techdebt.csv має містити щонайменше 3 записи (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"TD-1: Знайдено {len(rows)} записів технічного боргу (>= 3).")
+
+                has_deliberate_prudent = False
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 11:
+                        errors.append(f"techdebt.csv рядок {i}: очікується 11 колонок, отримано {len(r)}.")
+                        continue
+                    did, area, desc, dtype, origin, impact, effort_s, decision, plan, owner, due_sprint = [c.strip() for c in r]
+
+                    if dtype == "deliberate_prudent":
+                        has_deliberate_prudent = True
+
+                    try:
+                        eff_val = float(effort_s)
+                        if eff_val <= 0:
+                            errors.append(f"techdebt.csv рядок {i}: effort_hours має бути > 0 (отримано {eff_val}).")
+                    except ValueError:
+                        errors.append(f"techdebt.csv рядок {i}: effort_hours '{effort_s}' не є числом.")
+
+                    # TD-2: для pay_now та pay_later обов'язковий due_sprint, для accept - суворо порожній
+                    dec_lower = decision.lower()
+                    if dec_lower in ["pay_now", "pay_later"]:
+                        if not due_sprint:
+                            errors.append(f"TD-2 рядок {i} ({did}): для рішення '{decision}' поле due_sprint має містити номер спринта.")
+                    elif dec_lower == "accept":
+                        if due_sprint:
+                            errors.append(f"TD-2 рядок {i} ({did}): для рішення 'accept' поле due_sprint має бути порожнім (знайдено '{due_sprint}').")
+
+                if not has_deliberate_prudent:
+                    errors.append("TD-1: Потрібен щонайменше один запис типу 'deliberate_prudent'.")
+                else:
+                    successes.append("TD-1: Присутній запис технічного боргу типу 'deliberate_prudent'.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні techdebt.csv: {e}")
+
+    # 4. Перевірка changelog.csv
+    if os.path.isfile(changelog_path):
+        try:
+            with open(changelog_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = [
+                    "change_id", "date", "source", "description",
+                    "story_ids", "points_delta", "decision", "rationale", "affected_files"
+                ]
+                if header != expected_header:
+                    errors.append(f"CH-1: Неправильний заголовок changelog.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("CH-1: Заголовок changelog.csv валідний.")
+
+                rows = list(reader)
+                has_course_event_row = False
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 9:
+                        errors.append(f"changelog.csv рядок {i}: очікується 9 колонок, отримано {len(r)}.")
+                        continue
+                    cid, cdate, source, desc, sids, pdelta_s, decision, rationale, aff_files = [c.strip() for c in r]
+
+                    if source == "course_event" or cid == "CH-01":
+                        has_course_event_row = True
+
+                    try:
+                        int(pdelta_s)
+                    except ValueError:
+                        errors.append(f"CH-2 рядок {i}: points_delta '{pdelta_s}' не є цілим числом.")
+
+                    if not aff_files:
+                        errors.append(f"CH-3 рядок {i}: affected_files не може бути порожнім.")
+
+                if not has_course_event_row:
+                    errors.append("CH-1: Відсутній обов'язковий рядок події курсу (source='course_event' або change_id='CH-01').")
+                else:
+                    successes.append("CH-1: Присутній обов'язковий рядок події курсу (CH-01).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні changelog.csv: {e}")
+
+    # 5. Перевірка dod.md
+    if os.path.isfile(dod_path):
+        try:
+            with open(dod_path, mode="r", encoding="utf-8") as f:
+                dod_content = f.read()
+
+            required_dod_sections = [
+                "1. Умови, за яких історія вважається завершеною",
+                "2. Чого DoD свідомо не вимагає",
+                "3. Як це працює на практиці",
+                "4. Хто ухвалює відхилення від DoD"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_dod_sections:
+                pos = dod_content.find(sec)
+                if pos == -1:
+                    errors.append(f"dod.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("dod.md: Усі 4 обов'язкові розділи присутні у правильному порядку.")
+            else:
+                errors.append("dod.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", dod_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"dod.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("dod.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні dod.md: {e}")
+
+    # 6. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "1. Звідки взялися ризики",
+                "2. Перегляд реєстру",
+                "3. Definition of Done",
+                "4. Технічний борг",
+                "5. Подія курсу",
+                "6. Журнал змін"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі 6 обов'язкових розділів присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -1770,6 +2126,8 @@ if __name__ == "__main__":
             sys.exit(validate_forecast(target))
         elif "review" in target or "lr10" in target:
             sys.exit(validate_review(target))
+        elif "risk" in target or "debt" in target or "quality" in target or "lr11" in target:
+            sys.exit(validate_risks_quality(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -1788,6 +2146,8 @@ if __name__ == "__main__":
             labs.append(("lr09_forecast", validate_forecast))
         if os.path.isdir("lr10_review"):
             labs.append(("lr10_review", validate_review))
+        if os.path.isdir("lr11_risks_quality"):
+            labs.append(("lr11_risks_quality", validate_risks_quality))
 
         overall_res = 0
         for ldir, val_fn in labs:
