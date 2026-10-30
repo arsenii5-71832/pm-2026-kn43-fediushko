@@ -1109,6 +1109,263 @@ def validate_wbs(target_dir):
         return 0
 
 
+def validate_poker(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    readme_path = os.path.join(target_dir, "README.md")
+    votes_path = os.path.join(target_dir, "votes.csv")
+    estimates_path = os.path.join(target_dir, "estimates.csv")
+
+    for p, name in [(readme_path, "README.md"), (votes_path, "votes.csv"), (estimates_path, "estimates.csv")]:
+        if not os.path.isfile(p):
+            errors.append(f"PK-1: Файл {p} не знайдено.")
+        else:
+            successes.append(f"PK-1: Файл {name} знайдено в {target_dir}")
+
+    # Отримання списку історій REL-1 з lr06_backlog/backlog.csv
+    rel1_stories = set()
+    backlog_path = os.path.join("lr06_backlog", "backlog.csv")
+    if os.path.isfile(backlog_path):
+        try:
+            with open(backlog_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if header and "release" in header and "story_id" in header:
+                    s_idx = header.index("story_id")
+                    r_idx = header.index("release")
+                    for r in reader:
+                        if len(r) > max(s_idx, r_idx) and r[r_idx].strip() == "REL-1":
+                            rel1_stories.add(r[s_idx].strip())
+        except Exception as e:
+            errors.append(f"Помилка при читанні backlog.csv: {e}")
+
+    fib_scale = [0, 1, 2, 3, 5, 8, 13, 21]
+    fib_set = {str(x) for x in fib_scale} | {"?"}
+
+    def round_to_fib(val):
+        best_card = None
+        best_diff = 999.0
+        for card in fib_scale:
+            diff = abs(card - val)
+            if diff < best_diff:
+                best_diff = diff
+                best_card = card
+            elif abs(diff - best_diff) < 1e-6:
+                # Якщо посередині — беремо більшу
+                if card > best_card:
+                    best_card = card
+        return best_card
+
+    story_rounds = {}
+    votes_data = {}
+
+    # 2. Перевірка votes.csv
+    if os.path.isfile(votes_path):
+        try:
+            with open(votes_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["story_id", "round", "voter", "vote"]
+                if header != expected_header:
+                    errors.append(f"PK-1: Неправильний заголовок votes.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("PK-1: Заголовок votes.csv валідний.")
+
+                rows = list(reader)
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 4:
+                        errors.append(f"votes.csv рядок {i}: очікується 4 колонки, отримано {len(r)}.")
+                        continue
+                    sid, rnd_str, voter, vote_str = [c.strip() for c in r]
+                    try:
+                        rnd = int(rnd_str)
+                    except ValueError:
+                        errors.append(f"votes.csv рядок {i}: round '{rnd_str}' не є цілим числом.")
+                        rnd = 1
+
+                    if vote_str not in fib_set:
+                        errors.append(f"PK-3: votes.csv рядок {i}: оцінка '{vote_str}' не входить до шкали Фібоначчі (0, 1, 2, 3, 5, 8, 13, 21, ?).")
+
+                    story_rounds.setdefault(sid, set()).add(rnd)
+                    votes_data.setdefault(sid, {}).setdefault(rnd, {})[voter.lower()] = vote_str
+
+                # X-1 / PK-2: всі історії REL-1 оцінені
+                evaluated_stories = set(story_rounds.keys())
+                missing_stories = rel1_stories - evaluated_stories
+                if missing_stories:
+                    errors.append(f"X-1 / PK-2: У votes.csv відсутні історії релізу REL-1: {missing_stories}")
+                else:
+                    successes.append(f"X-1 / PK-2: Усі {len(rel1_stories)} історій REL-1 присутні у votes.csv.")
+
+                # PK-4: раунд 1 містить рівно 3 голоси (optimistic <= likely <= pessimistic)
+                expected_voters = {"optimistic", "likely", "pessimistic"}
+                for sid, r_dict in votes_data.items():
+                    if 1 not in r_dict:
+                        errors.append(f"PK-4: Для історії {sid} відсутній раунд 1.")
+                        continue
+                    r1 = r_dict[1]
+                    if set(r1.keys()) != expected_voters:
+                        errors.append(f"PK-4: Історія {sid} (раунд 1) повинна мати рівно 3 виборців: optimistic, likely, pessimistic (отримано: {list(r1.keys())}).")
+                    else:
+                        try:
+                            o = int(r1["optimistic"])
+                            m = int(r1["likely"])
+                            p = int(r1["pessimistic"])
+                            if not (o <= m <= p):
+                                errors.append(f"PK-4: Історія {sid} (раунд 1) порушує монотонність: optimistic ({o}) <= likely ({m}) <= pessimistic ({p}).")
+                        except ValueError:
+                            pass
+
+                # PK-5: наявність історії з раундом 2 (Конверт 1)
+                has_round_2 = any(len(r_dict) >= 2 for r_dict in votes_data.values())
+                if not has_round_2:
+                    errors.append("PK-5: Відсутня історія з round=2 (переоцінка за Конвертом 1).")
+                else:
+                    successes.append("PK-5: Присутня історія з round=2 за Конвертом 1.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні votes.csv: {e}")
+
+    # 3. Перевірка estimates.csv
+    if os.path.isfile(estimates_path):
+        try:
+            with open(estimates_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["story_id", "final_estimate", "rounds", "spread_note"]
+                if header != expected_header:
+                    errors.append(f"ES-1: Неправильний заголовок estimates.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("ES-1: Заголовок estimates.csv валідний.")
+
+                rows = list(reader)
+                est_stories = set()
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 4:
+                        errors.append(f"estimates.csv рядок {i}: очікується 4 колонки, отримано {len(r)}.")
+                        continue
+                    sid, fest_str, rnds_str, note = [c.strip() for c in r]
+                    est_stories.add(sid)
+
+                    try:
+                        fest = int(fest_str)
+                    except ValueError:
+                        errors.append(f"ES-5: estimates.csv рядок {i}: final_estimate '{fest_str}' не є цілим числом.")
+                        fest = None
+
+                    try:
+                        rnds = int(rnds_str)
+                    except ValueError:
+                        errors.append(f"ES-1: estimates.csv рядок {i}: rounds '{rnds_str}' не є цілим числом.")
+                        rnds = 1
+
+                    if sid in votes_data:
+                        actual_max_round = max(votes_data[sid].keys())
+                        if rnds != actual_max_round:
+                            errors.append(f"ES-1: Для {sid} значення rounds={rnds} не відповідає максимальному раунду з votes.csv ({actual_max_round}).")
+
+                        # Розрахунок PERT за останнім раундом
+                        last_r = votes_data[sid][actual_max_round]
+                        if all(k in last_r and last_r[k] in fib_set and last_r[k] != "?" for k in ["optimistic", "likely", "pessimistic"]):
+                            o = int(last_r["optimistic"])
+                            m = int(last_r["likely"])
+                            p = int(last_r["pessimistic"])
+                            pert = (o + 4.0 * m + p) / 6.0
+                            expected_fib = round_to_fib(pert)
+
+                            if fest is not None and fest != expected_fib:
+                                errors.append(f"ES-4: Для {sid} final_estimate={fest} не відповідає PERT-округленню до шкали Фібоначчі {expected_fib} (PERT={pert:.3f}).")
+
+                            # Перевірка ширини розкиду
+                            if o in fib_scale and p in fib_scale:
+                                idx_o = fib_scale.index(o)
+                                idx_p = fib_scale.index(p)
+                                # 2 або більше проміжних карток означає різницю індексів >= 3
+                                if (idx_p - idx_o >= 3 or actual_max_round >= 2) and not note:
+                                    errors.append(f"ES-6: Для історії {sid} обов'язково має бути заповнено spread_note (широкий розкид або переоцінка Конверта 1).")
+
+                # ES-3: рівно по одному рядку на кожну історію з votes.csv
+                if est_stories != set(votes_data.keys()):
+                    errors.append(f"ES-3: Історії в estimates.csv {est_stories} не збігаються з історіями у votes.csv {set(votes_data.keys())}.")
+                else:
+                    successes.append(f"ES-3: estimates.csv містить рівно по одному рядку на кожну історію з votes.csv ({len(est_stories)} історій).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні estimates.csv: {e}")
+
+    # 4. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                content = f.read()
+
+            required_sections = [
+                "1. Формат і масштаб",
+                "2. Історії з найбільшим розкидом",
+                "3. Конверт 1: переоцінка після нової інформації",
+                "4. Сума першого релізу проти ємності варіанта",
+                "5. Конверт 2: відповідь замовнику про години",
+                "6. Історії з карткою «не розумію»",
+                "7. Що я зрозумів про свій беклог"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_sections:
+                pos = content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі 7 розділів присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -1118,6 +1375,8 @@ if __name__ == "__main__":
             sys.exit(validate_backlog(target))
         elif "wbs" in target or "lr07" in target:
             sys.exit(validate_wbs(target))
+        elif "poker" in target or "lr08" in target:
+            sys.exit(validate_poker(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -1130,6 +1389,8 @@ if __name__ == "__main__":
             labs.append(("lr06_backlog", validate_backlog))
         if os.path.isdir("lr07_wbs"):
             labs.append(("lr07_wbs", validate_wbs))
+        if os.path.isdir("lr08_poker"):
+            labs.append(("lr08_poker", validate_poker))
 
         overall_res = 0
         for ldir, val_fn in labs:
