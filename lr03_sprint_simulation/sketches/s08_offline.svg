@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 620" width="100%" height="100%">
+  <defs>
+    <style>
+      .phone-bg { fill: #0F172A; stroke: #334155; stroke-width: 2; rx: 32px; }
+      .notch { fill: #1E293B; rx: 10px; }
+      .app-header { fill: #1E293B; }
+      .card { fill: #1E293B; stroke: #334155; stroke-width: 1.5; rx: 12px; }
+      .card-active { fill: #1E293B; stroke: #38BDF8; stroke-width: 2; rx: 12px; }
+      .btn-primary { fill: #0284C7; rx: 8px; cursor: pointer; }
+      .btn-secondary { fill: #334155; rx: 8px; }
+      .t-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; font-weight: 700; fill: #F8FAFC; }
+      .t-sub { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #94A3B8; }
+      .t-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; fill: #E2E8F0; }
+      .t-bold { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 600; fill: #FFFFFF; }
+      .t-btn { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 600; fill: #FFFFFF; text-anchor: middle; }
+      .badge-live { fill: #059669; rx: 4px; }
+      .badge-warn { fill: #D97706; rx: 4px; }
+      .badge-danger { fill: #DC2626; rx: 4px; }
+    </style>
+  </defs>
+
+  <!-- Device Frame -->
+  <rect x="10" y="10" width="360" height="600" class="phone-bg"/>
+  <!-- Speaker Notch -->
+  <rect x="130" y="20" width="120" height="18" class="notch"/>
+
+  <!-- App Header -->
+  <rect x="20" y="50" width="340" height="56" class="app-header" rx="10 10 0 0"/>
+  <text x="36" y="74" class="t-title">S-08 Розклад без інтернету</text>
+  <text x="36" y="93" class="t-sub">Локальне збереження та кеш</text>
+
+  <!-- Screen Content -->
+  
+  <!-- Offline status indicator -->
+  <rect x="36" y="120" width="308" height="44" class="card" stroke="#E11D48"/>
+  <circle cx="56" cy="142" r="8" fill="#E11D48"/>
+  <text x="74" y="147" class="t-bold" fill="#FB7185">Офлайн-режим (немає мережі)</text>
+
+  <!-- Cached schedule container -->
+  <rect x="36" y="178" width="308" height="240" class="card"/>
+  <text x="52" y="204" class="t-bold">Збережений розклад (кеш SQLite):</text>
+  <text x="52" y="224" class="t-sub">Останнє оновлення: Сьогодні о 08:15</text>
+
+  <rect x="52" y="238" width="276" height="52" class="card" fill="#0F172A"/>
+  <text x="64" y="258" class="t-bold" font-size="12">1 пара: Управління IT-проєктами</text>
+  <text x="64" y="276" class="t-sub">08:30 • Ауд. 312 • Доступно офлайн</text>
+
+  <rect x="52" y="300" width="276" height="52" class="card" fill="#0F172A"/>
+  <text x="64" y="320" class="t-bold" font-size="12">2 пара: Системний аналіз</text>
+  <text x="64" y="338" class="t-sub">10:25 • Ауд. 208 • Доступно офлайн</text>
+
+  <text x="52" y="380" class="t-sub">Усі дані пари та аудиторії читаються без інтернету</text>
+
+  <!-- Sync status -->
+  <rect x="36" y="434" width="308" height="44" class="btn-secondary"/>
+  <text x="190" y="461" class="t-btn">🔄 Оновити розклад при появі мережі</text>
+
+</svg>
