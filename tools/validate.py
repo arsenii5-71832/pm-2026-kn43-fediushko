@@ -676,11 +676,464 @@ def validate_backlog(target_dir):
         return 0
 
 
-if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "lr01_case"
-    if "charter" in target or "lr05" in target:
-        sys.exit(validate_charter(target))
-    elif "backlog" in target or "lr06" in target:
-        sys.exit(validate_backlog(target))
+def validate_wbs(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    readme_path = os.path.join(target_dir, "README.md")
+    wbs_path = os.path.join(target_dir, "wbs.csv")
+    schedule_path = os.path.join(target_dir, "schedule.csv")
+    roadmap_path = os.path.join(target_dir, "roadmap.csv")
+
+    # 1. Наявність файлів
+    for p, name in [(readme_path, "README.md"), (wbs_path, "wbs.csv"), (schedule_path, "schedule.csv"), (roadmap_path, "roadmap.csv")]:
+        if not os.path.isfile(p):
+            errors.append(f"Файл {p} не знайдено.")
+        else:
+            successes.append(f"Файл {name} знайдено в {target_dir}")
+
+    wbs_leaf_ids = set()
+    wbs_nodes = {}
+    wbs_children = {}
+
+    # 2. Перевірка wbs.csv
+    if os.path.isfile(wbs_path):
+        try:
+            with open(wbs_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["wbs_id", "parent_id", "name", "level", "deliverable", "owner", "estimate_hours"]
+                if header != expected_header:
+                    errors.append(f"WBS-1: Неправильний заголовок wbs.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("WBS-1: Заголовок wbs.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 12:
+                    errors.append(f"WBS-2: WBS має містити щонайменше 12 вузлів (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"WBS-2: Знайдено {len(rows)} вузлів у WBS (>= 12).")
+
+                levels_found = set()
+                parent_map = {}
+                hours_map = {}
+                owner_map = {}
+                deliverable_map = {}
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 7:
+                        errors.append(f"wbs.csv рядок {i}: очікується 7 колонок, отримано {len(r)}.")
+                        continue
+                    wid, pid, name, lvl, deliv, owner, hours = [c.strip() for c in r]
+                    try:
+                        lvl_int = int(lvl)
+                        levels_found.add(lvl_int)
+                    except ValueError:
+                        errors.append(f"wbs.csv рядок {i}: level '{lvl}' не є цілим числом.")
+                        lvl_int = 0
+
+                    try:
+                        h_val = float(hours)
+                    except ValueError:
+                        errors.append(f"wbs.csv рядок {i}: estimate_hours '{hours}' не є числом.")
+                        h_val = 0.0
+
+                    wbs_nodes[wid] = {"name": name, "level": lvl_int, "deliverable": deliv, "owner": owner, "hours": h_val, "parent": pid}
+                    hours_map[wid] = h_val
+                    owner_map[wid] = owner
+                    deliverable_map[wid] = deliv
+                    parent_map[wid] = pid
+                    wbs_children.setdefault(pid, []).append(wid)
+
+                if levels_found != {1, 2, 3}:
+                    errors.append(f"WBS-2: WBS повинен мати рівно 3 рівні ієрархії (знайдено рівні: {sorted(levels_found)}).")
+                else:
+                    successes.append("WBS-2: WBS має рівно 3 рівні ієрархії (корінь, рівень 2, листки).")
+
+                # Перевірка обов'язкових гілок 2-го рівня: 1.1 ... 1.5
+                expected_lvl2 = {"1.1", "1.2", "1.3", "1.4", "1.5"}
+                found_lvl2 = {wid for wid, d in wbs_nodes.items() if d["level"] == 2}
+                if not expected_lvl2.issubset(found_lvl2):
+                    errors.append(f"WBS-2: Відсутні обов'язкові гілки 2-го рівня (1.1..1.5). Знайдено: {found_lvl2}")
+                else:
+                    successes.append("WBS-2: Усі гілки другого рівня (1.1..1.5) присутні.")
+
+                # Визначення листових вузлів (вузли, які не є батьками для жодного іншого вузла)
+                all_parents = set(parent_map.values())
+                for wid, d in wbs_nodes.items():
+                    if wid not in all_parents and d["level"] == 3:
+                        wbs_leaf_ids.add(wid)
+
+                # WBS-3. Правило 100%
+                rule100_ok = True
+                for wid, children in wbs_children.items():
+                    if wid and wid in hours_map:
+                        children_sum = sum(hours_map[c] for c in children)
+                        parent_hours = hours_map[wid]
+                        if abs(children_sum - parent_hours) > 0.01:
+                            errors.append(f"WBS-3 (Правило 100%): Вузол {wid} ({parent_hours} год) != сумі дочірніх вузлів {children} ({children_sum} год).")
+                            rule100_ok = False
+                if rule100_ok:
+                    successes.append("WBS-3: Правило 100% виконано: години кожного вузла точно дорівнюють сумі дочірніх.")
+
+                # WBS-4: Стеля годин за варіантом V08 (12 тижнів = 60 днів)
+                # PM: 0.5 * 60 * 8 = 240
+                # Dev: 2.0 * 60 * 8 = 960
+                # QA: 1.0 * 60 * 8 = 480
+                # DevOps: 0.25 * 60 * 8 = 120
+                # Total: 1800
+                root_node = next((wid for wid, d in wbs_nodes.items() if d["level"] == 1), None)
+                if root_node:
+                    root_hours = hours_map[root_node]
+                    ceiling = 1800.0
+                    min_allowed = 0.70 * ceiling
+                    max_allowed = 1.00 * ceiling
+                    if root_hours < min_allowed or root_hours > max_allowed:
+                        errors.append(f"WBS-4: Загальний обсяг проєкту ({root_hours} год) має бути в межах 70–100% стелі варіанта V08 ({min_allowed:.0f}–{max_allowed:.0f} год).")
+                    else:
+                        successes.append(f"WBS-4: Обсяг проєкту {root_hours:.0f} год відповідає 70-100% стелі ({min_allowed:.0f}–{max_allowed:.0f} год, {root_hours/ceiling*100:.1f}%).")
+
+                # Перевірка годин за ролями для листових вузлів
+                role_hours = {}
+                for wid in wbs_leaf_ids:
+                    own = owner_map[wid]
+                    role_hours[own] = role_hours.get(own, 0.0) + hours_map[wid]
+
+                role_ceilings = {"PM": 240.0, "Dev": 960.0, "QA": 480.0, "DevOps": 120.0}
+                for role, limit in role_ceilings.items():
+                    actual = role_hours.get(role, 0.0)
+                    if actual > limit:
+                        errors.append(f"WBS-4: Роль {role} перевищує стелю годин варіанта ({actual:.0f} > {limit:.0f} год).")
+                    else:
+                        successes.append(f"WBS-4: Роль {role} у межах ліміту ({actual:.0f} <= {limit:.0f} год).")
+
+                # Deliverables: Тільки іменникові фрази (перевірка на типові дієслова на початку)
+                verb_starts = ["розробити", "створити", "дослідити", "провести", "реалізувати", "написати", "налаштувати", "підготувати", "виконати", "тестувати"]
+                verb_errors = 0
+                for wid, deliv in deliverable_map.items():
+                    first_word = deliv.lower().split()[0] if deliv.strip() else ""
+                    if any(first_word.startswith(vb) for vb in verb_starts):
+                        errors.append(f"WBS deliverable ({wid}): результат має бути іменником/іменниковою фразою, а не дієсловом ('{deliv}').")
+                        verb_errors += 1
+                if verb_errors == 0:
+                    successes.append("WBS deliverable: Усі результати сформульовані як іменникові фрази (без дієслів).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні wbs.csv: {e}")
+
+    # 3. Перевірка schedule.csv
+    schedule_tasks = {}
+    if os.path.isfile(schedule_path):
+        try:
+            with open(schedule_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["task_id", "wbs_id", "name", "duration_days", "predecessors", "milestone", "float_days", "is_critical"]
+                if header != expected_header:
+                    errors.append(f"SCH-1: Неправильний заголовок schedule.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("SCH-1: Заголовок schedule.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 10:
+                    errors.append(f"SCH-5: Графік має містити щонайменше 10 робіт (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"SCH-5: Знайдено {len(rows)} робіт у графіку (>= 10).")
+
+                covered_wbs_leaves = set()
+                start_tasks_count = 0
+                milestone_count = 0
+
+                graph = {}
+                durations = {}
+                recorded_floats = {}
+                recorded_criticals = {}
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 8:
+                        errors.append(f"schedule.csv рядок {i}: очікується 8 колонок, отримано {len(r)}.")
+                        continue
+                    tid, wid, name, dur, preds, ms, fl, crit = [c.strip() for c in r]
+
+                    try:
+                        dur_val = float(dur)
+                    except ValueError:
+                        errors.append(f"schedule.csv рядок {i}: duration_days '{dur}' не є числом.")
+                        dur_val = 0.0
+
+                    try:
+                        fl_val = float(fl)
+                    except ValueError:
+                        errors.append(f"schedule.csv рядок {i}: float_days '{fl}' не є числом.")
+                        fl_val = 0.0
+
+                    pred_list = [p.strip() for p in preds.split(",") if p.strip()]
+                    if not pred_list:
+                        start_tasks_count += 1
+
+                    if ms.lower() == "yes":
+                        milestone_count += 1
+                        if dur_val != 0:
+                            errors.append(f"SCH-4: Віха {tid} повинна мати duration_days = 0 (отримано {dur_val}).")
+
+                    # X-11: посилання на листовий вузол
+                    if wid not in wbs_leaf_ids:
+                        errors.append(f"X-11: Робота {tid} посилається на нелистовий або неіснуючий вузол WBS '{wid}'.")
+                    else:
+                        covered_wbs_leaves.add(wid)
+
+                    schedule_tasks[tid] = {"wbs_id": wid, "name": name, "duration": dur_val, "preds": pred_list, "milestone": ms.lower(), "float": fl_val, "critical": crit.lower()}
+                    durations[tid] = dur_val
+                    graph[tid] = pred_list
+                    recorded_floats[tid] = fl_val
+                    recorded_criticals[tid] = crit.lower()
+
+                # X-12: покриття листових вузлів WBS
+                uncovered_leaves = wbs_leaf_ids - covered_wbs_leaves
+                if uncovered_leaves:
+                    errors.append(f"X-12: Листові вузли WBS {uncovered_leaves} не мають жодної роботи в календарному плані.")
+                else:
+                    successes.append("X-12: Усі листові вузли WBS покриті роботами графіка.")
+
+                # Стартові роботи
+                if start_tasks_count < 2:
+                    errors.append(f"SCH-5: Потрібно щонайменше 2 стартові роботи без попередників (знайдено {start_tasks_count}).")
+                else:
+                    successes.append(f"SCH-5: Знайдено {start_tasks_count} стартових робіт без попередників (>= 2).")
+
+                # Віхи
+                if milestone_count < 2:
+                    errors.append(f"SCH-4: Потрібно щонайменше 2 віхи з milestone=yes (знайдено {milestone_count}).")
+                else:
+                    successes.append(f"SCH-4: Знайдено {milestone_count} віх (>= 2).")
+
+                # Розрахунок критичного шляху: перевірка на цикли та обчислення ES, EF, LS, LF, Float
+                in_degree = {u: len(preds) for u, preds in graph.items()}
+                succ_graph = {u: [] for u in graph}
+                for u, preds in graph.items():
+                    for p in preds:
+                        if p in succ_graph:
+                            succ_graph[p].append(u)
+                        else:
+                            errors.append(f"SCH-1: Робота {u} посилається на неіснуючого попередника '{p}'.")
+
+                # Топологічне сортування
+                topo_order = []
+                queue = [u for u, deg in in_degree.items() if deg == 0]
+                temp_in_degree = in_degree.copy()
+                while queue:
+                    u = queue.pop(0)
+                    topo_order.append(u)
+                    for s in succ_graph.get(u, []):
+                        temp_in_degree[s] -= 1
+                        if temp_in_degree[s] == 0:
+                            queue.append(s)
+
+                if len(topo_order) != len(graph):
+                    errors.append("SCH-1: Виявлено цикл у графі залежностей графіка!")
+                else:
+                    successes.append("SCH-1: Граф робіт ациклічний (циклів не виявлено).")
+
+                    # Прямий прохід
+                    es = {}
+                    ef = {}
+                    for u in topo_order:
+                        preds = graph[u]
+                        es[u] = max([ef[p] for p in preds], default=0.0)
+                        ef[u] = es[u] + durations[u]
+
+                    project_duration = max(ef.values(), default=0.0)
+
+                    # Зворотний прохід
+                    lf = {}
+                    ls = {}
+                    for u in reversed(topo_order):
+                        succs = succ_graph.get(u, [])
+                        lf[u] = min([ls[s] for s in succs], default=project_duration)
+                        ls[u] = lf[u] - durations[u]
+
+                    # Перевірка float_days та is_critical
+                    float_mismatch = 0
+                    crit_mismatch = 0
+                    for u in graph:
+                        calc_float = ls[u] - es[u]
+                        rec_float = recorded_floats[u]
+                        if abs(calc_float - rec_float) > 0.01:
+                            errors.append(f"SCH-2: Робота {u}: розрахунковий float={calc_float:.0f}, зазначено float_days={rec_float:.0f}.")
+                            float_mismatch += 1
+
+                        expected_crit = "yes" if abs(calc_float) < 0.01 else "no"
+                        rec_crit = recorded_criticals[u]
+                        if expected_crit != rec_crit:
+                            errors.append(f"SCH-3: Робота {u}: is_critical має бути '{expected_crit}', зазначено '{rec_crit}'.")
+                            crit_mismatch += 1
+
+                    if float_mismatch == 0:
+                        successes.append(f"SCH-2: Усі значення float_days математично точні (довжина критичного шляху: {project_duration:.0f} дн).")
+                    if crit_mismatch == 0:
+                        successes.append("SCH-3: Поле is_critical позначено як 'yes' виключно для робіт із float=0.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні schedule.csv: {e}")
+
+    # 4. Перевірка roadmap.csv
+    roadmap_releases = set()
+    if os.path.isfile(roadmap_path):
+        try:
+            with open(roadmap_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["release_id", "name", "target_date", "goal"]
+                if header != expected_header:
+                    errors.append(f"RM-1: Неправильний заголовок roadmap.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("RM-1: Заголовок roadmap.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 2:
+                    errors.append(f"RM-1: Дорожня карта повинна містити щонайменше 2 релізи (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"RM-1: Знайдено {len(rows)} релізи у roadmap.csv (>= 2).")
+
+                date_regex = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+                dates = {}
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 4:
+                        errors.append(f"roadmap.csv рядок {i}: очікується 4 колонки, отримано {len(r)}.")
+                        continue
+                    rel_id, name, tdate, goal = [c.strip() for c in r]
+                    roadmap_releases.add(rel_id)
+                    dates[rel_id] = tdate
+                    if not date_regex.match(tdate):
+                        errors.append(f"roadmap.csv рядок {i}: target_date '{tdate}' не у форматі YYYY-MM-DD.")
+
+                if "REL-1" in dates and "REL-2" in dates:
+                    if dates["REL-2"] <= dates["REL-1"]:
+                        errors.append(f"RM-1: Дата REL-2 ({dates['REL-2']}) повинна бути пізнішою за REL-1 ({dates['REL-1']}).")
+                    else:
+                        successes.append(f"RM-1: Дати релізів хронологічно послідовні ({dates['REL-1']} -> {dates['REL-2']}).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні roadmap.csv: {e}")
+
+    # X-13: Синхронізація з lr06_backlog/backlog.csv
+    backlog_path = os.path.join("lr06_backlog", "backlog.csv")
+    if os.path.isfile(backlog_path):
+        try:
+            with open(backlog_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                backlog_releases = set()
+                if header and "release" in header:
+                    rel_idx = header.index("release")
+                    for r in reader:
+                        if len(r) > rel_idx and r[rel_idx].strip():
+                            backlog_releases.add(r[rel_idx].strip())
+
+                if not roadmap_releases.issubset(backlog_releases):
+                    errors.append(f"X-13 / RM-1: Релізи з дорожньої карти {roadmap_releases} відсутні у беклозі (у беклозі є: {backlog_releases}).")
+                else:
+                    successes.append(f"X-13 / RM-1: Усі релізи дорожньої карти {roadmap_releases} присутні у беклозі.")
+        except Exception as e:
+            errors.append(f"Помилка при читанні lr06_backlog/backlog.csv: {e}")
+
+    # 5. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                content = f.read()
+
+            required_sections = [
+                "1. Стеля годин мого варіанта",
+                "2. Правило 100%: як перевіряли",
+                "3. Тривалості: звідки взялися числа",
+                "4. Критичний шлях",
+                "5. Віхи",
+                "6. Дорожня карта",
+                "7. Робочий журнал"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_sections:
+                pos = content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі 7 розділів присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
     else:
-        sys.exit(validate_case(target))
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        target = sys.argv[1]
+        if "charter" in target or "lr05" in target:
+            sys.exit(validate_charter(target))
+        elif "backlog" in target or "lr06" in target:
+            sys.exit(validate_backlog(target))
+        elif "wbs" in target or "lr07" in target:
+            sys.exit(validate_wbs(target))
+        else:
+            sys.exit(validate_case(target))
+    else:
+        labs = []
+        if os.path.isdir("lr01_case"):
+            labs.append(("lr01_case", validate_case))
+        if os.path.isdir("lr05_charter"):
+            labs.append(("lr05_charter", validate_charter))
+        if os.path.isdir("lr06_backlog"):
+            labs.append(("lr06_backlog", validate_backlog))
+        if os.path.isdir("lr07_wbs"):
+            labs.append(("lr07_wbs", validate_wbs))
+
+        overall_res = 0
+        for ldir, val_fn in labs:
+            res = val_fn(ldir)
+            if res != 0:
+                overall_res = 1
+        sys.exit(overall_res)
