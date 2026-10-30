@@ -1609,6 +1609,152 @@ def validate_forecast(target_dir):
         return 0
 
 
+def validate_review(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    review_path = os.path.join(target_dir, "review.md")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    # 1. Перевірка наявності файлів
+    if not os.path.isfile(review_path):
+        errors.append(f"Файл {review_path} не знайдено.")
+    else:
+        successes.append(f"Файл review.md знайдено в {target_dir}")
+
+    if not os.path.isfile(readme_path):
+        errors.append(f"Файл {readme_path} не знайдено.")
+    else:
+        successes.append(f"Файл README.md знайдено в {target_dir}")
+
+    # 2. Перевірка review.md
+    if os.path.isfile(review_path):
+        try:
+            with open(review_path, mode="r", encoding="utf-8") as f:
+                r_content = f.read()
+
+            required_sections = [
+                "## 1. Механіка",
+                "## 2. Наскрізність",
+                "## 3. Три зауваження",
+                "## 4. Знахідка",
+                "## 5. Чого в портфелі ще немає"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_sections:
+                pos = r_content.find(sec)
+                if pos == -1:
+                    errors.append(f"review.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("review.md: Усі 5 обов'язкових розділів присутні у правильному порядку.")
+            else:
+                errors.append("review.md: Розділи розташовані не у правильному порядку.")
+
+            if "рецензент" not in r_content.lower() or "arsenii" not in r_content.lower():
+                errors.append("review.md: Метадані не містять посилання на рецензента (GitHub логін).")
+            else:
+                successes.append("review.md: Метадані містять рецензента.")
+
+            if "student-" not in r_content and "next" not in r_content:
+                warnings.append("review.md: Бажано зазначити GitHub логін автора (n+1) у метаданих.")
+            else:
+                successes.append("review.md: Метадані містять логін автора.")
+
+            rem_count = len(re.findall(r"###\s*Зауваження\s*\d+", r_content, re.IGNORECASE))
+            if rem_count < 3:
+                rem_count_alt = len(re.findall(r"(?:REM-\d+|Зауваження\s*\d+)", r_content, re.IGNORECASE))
+                if rem_count_alt >= 3:
+                    successes.append(f"review.md: Знайдено щонайменше 3 зауваження ({rem_count_alt}).")
+                else:
+                    errors.append(f"review.md: Розділ 3 повинен містити щонайменше 3 зауваження (знайдено {rem_count}).")
+            else:
+                successes.append(f"review.md: Знайдено {rem_count} окремих зауважень (>= 3).")
+
+            if "рядок" not in r_content.lower() and "line" not in r_content.lower():
+                warnings.append("review.md: Рекомендується вказувати точні номери рядків у зауваженнях.")
+            else:
+                successes.append("review.md: Зауваження містять посилання на рядки артефактів.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", r_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"review.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("review.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні review.md: {e}")
+
+    # 3. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_readme_sections = [
+                "Рішення по зауваженнях",
+                "Що я забрав із чужого портфеля",
+                "Що я перевірю сам перед захистом"
+            ]
+
+            for sec in required_readme_sections:
+                if sec not in rm_content:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    successes.append(f"README.md: Знайдено обов'язковий розділ '{sec}'.")
+
+            if "REM-" not in rm_content and "Accept" not in rm_content and "Reject" not in rm_content:
+                warnings.append("README.md: Таблиця рішень бажано має містити вердикти Accept / Reject / Modify.")
+            else:
+                successes.append("README.md: Таблиця рішень містить вердикти.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -1622,6 +1768,8 @@ if __name__ == "__main__":
             sys.exit(validate_poker(target))
         elif "forecast" in target or "lr09" in target:
             sys.exit(validate_forecast(target))
+        elif "review" in target or "lr10" in target:
+            sys.exit(validate_review(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -1638,6 +1786,8 @@ if __name__ == "__main__":
             labs.append(("lr08_poker", validate_poker))
         if os.path.isdir("lr09_forecast"):
             labs.append(("lr09_forecast", validate_forecast))
+        if os.path.isdir("lr10_review"):
+            labs.append(("lr10_review", validate_review))
 
         overall_res = 0
         for ldir, val_fn in labs:
