@@ -2392,6 +2392,281 @@ def validate_communication(target_dir):
         return 0
 
 
+def validate_status_report(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    impact_path = os.path.join(target_dir, "impact.csv")
+    readme_path = os.path.join(target_dir, "README.md")
+    cr_path = os.path.join(target_dir, "change_request.md")
+
+    # 1. Перевірка наявності файлів
+    for p, name in [(impact_path, "impact.csv"), (readme_path, "README.md"), (cr_path, "change_request.md")]:
+        if not os.path.isfile(p):
+            errors.append(f"Файл {p} не знайдено.")
+        else:
+            successes.append(f"Файл {name} знайдено в {target_dir}")
+
+    # Завантаження суміжних файлів для наскрізної перевірки (IM-2, X-16, X-17, X-18)
+    valid_risks = set()
+    risks_path = os.path.join("lr11_risks_quality", "risks.csv")
+    if os.path.isfile(risks_path):
+        try:
+            with open(risks_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if row:
+                        valid_risks.add(row[0].strip())
+        except Exception:
+            pass
+
+    ch01_decision = None
+    ch01_points_delta = None
+    changelog_path = os.path.join("lr11_risks_quality", "changelog.csv")
+    if os.path.isfile(changelog_path):
+        try:
+            with open(changelog_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if len(row) >= 7 and row[0].strip() == "CH-01":
+                        ch01_points_delta = row[5].strip()
+                        ch01_decision = row[6].strip().lower()
+        except Exception:
+            pass
+
+    target_date_rel1 = None
+    roadmap_path = os.path.join("lr07_wbs", "roadmap.csv")
+    if os.path.isfile(roadmap_path):
+        try:
+            with open(roadmap_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if len(row) >= 3 and row[0].strip() == "REL-1":
+                        target_date_rel1 = row[2].strip()
+        except Exception:
+            pass
+
+    p85_date_rel1 = None
+    forecast_path = os.path.join("lr09_forecast", "forecast.csv")
+    if os.path.isfile(forecast_path):
+        try:
+            with open(forecast_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                row = next(r, None)
+                if row and len(row) >= 7:
+                    p85_date_rel1 = row[6].strip()
+        except Exception:
+            pass
+
+    # 2. Перевірка impact.csv
+    if os.path.isfile(impact_path):
+        try:
+            with open(impact_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["dimension", "before", "after", "delta", "risk_ids", "source_file", "note"]
+                if header != expected_header:
+                    errors.append(f"IM-1: Неправильний заголовок impact.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("IM-1: Заголовок impact.csv валідний.")
+
+                rows = list(reader)
+                expected_dims = {"scope", "schedule", "budget", "quality", "risk"}
+                found_dims = set()
+                changed_count = 0
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 7:
+                        errors.append(f"impact.csv рядок {i}: очікується 7 колонок, отримано {len(r)}.")
+                        continue
+                    dim, before, after, delta, risk_ids, src_file, note = [c.strip() for c in r]
+                    found_dims.add(dim)
+
+                    if before != after:
+                        changed_count += 1
+
+                    # IM-1 & IM-4: наявність чисел
+                    if dim in ("scope", "schedule", "budget", "risk"):
+                        for col_name, col_val in [("before", before), ("after", after), ("delta", delta)]:
+                            if not re.search(r"\d", col_val):
+                                errors.append(f"IM-1 / IM-4 рядок {i} ({dim}): колонка '{col_name}' повинна містити числове значення (отримано '{col_val}').")
+
+                    if not re.search(r"\d", delta):
+                        errors.append(f"IM-4 рядок {i} ({dim}): поле delta не може бути описовим без чисел ('{delta}').")
+
+                    # IM-2: risk_ids для risk
+                    if dim == "risk":
+                        if not risk_ids:
+                            errors.append("IM-2: Рядок 'risk' повинен мати заповнене поле risk_ids.")
+                        else:
+                            rlist = [rk.strip() for rk in risk_ids.split(";") if rk.strip()]
+                            for rk in rlist:
+                                if valid_risks and rk not in valid_risks:
+                                    errors.append(f"IM-2: Ризик '{rk}' відсутній у lr11_risks_quality/risks.csv.")
+                            if rlist:
+                                successes.append(f"IM-2: Рядок risk посилається на валідні ризики {rlist}.")
+
+                    # X-16: існування source_file
+                    if not src_file or not os.path.isfile(src_file) or os.path.getsize(src_file) == 0:
+                        errors.append(f"X-16 рядок {i} ({dim}): файл джерела '{src_file}' не існує або порожній.")
+
+                    # Звірка points_delta з CH-01
+                    if dim == "scope" and ch01_points_delta is not None:
+                        if ch01_points_delta not in delta:
+                            warnings.append(f"IM-1: У полі scope.delta бажано явно зазначити нетто {ch01_points_delta} (як у CH-01).")
+
+                if found_dims != expected_dims:
+                    errors.append(f"IM-1: Мають бути рівно 5 вимірів {expected_dims} (отримано {found_dims}).")
+                else:
+                    successes.append("IM-1: Усі 5 вимірів (scope, schedule, budget, quality, risk) присутні.")
+
+                if changed_count < 3:
+                    errors.append(f"IM-3: Щонайменше 3 виміри мають мати before != after (знайдено {changed_count}).")
+                else:
+                    successes.append(f"IM-3: У {changed_count} вимірах значення before != after (>= 3).")
+
+                if not any("X-16" in e for e in errors):
+                    successes.append("X-16: Усі файли джерел у source_file існують та непорожні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні impact.csv: {e}")
+
+    # 3. Перевірка README.md (статус-звіт)
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "1. Головне трьома реченнями",
+                "2. Топ-3 ризики",
+                "3. Три числа",
+                "4. Чого я прошу"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі обов'язкові розділи статус-звіту присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            # X-17: перевірка дат
+            if target_date_rel1 and target_date_rel1 not in rm_content:
+                errors.append(f"X-17: У статус-звіті відсутня планова дата REL-1 '{target_date_rel1}' із roadmap.csv.")
+            if p85_date_rel1 and p85_date_rel1 not in rm_content:
+                errors.append(f"X-17: У статус-звіті відсутня прогнозна дата P85 '{p85_date_rel1}' із forecast.csv.")
+            if target_date_rel1 and p85_date_rel1 and target_date_rel1 in rm_content and p85_date_rel1 in rm_content:
+                successes.append(f"X-17: Дати першого релізу ({p85_date_rel1} проти {target_date_rel1}) коректно звірені.")
+
+            if "прийняти до відома" in rm_content.lower():
+                errors.append("README.md Розділ 4: Заборонено формулювання 'прийняти до відома', потрібне конкретне управлінське рішення.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # 4. Перевірка change_request.md
+    if os.path.isfile(cr_path):
+        try:
+            with open(cr_path, mode="r", encoding="utf-8") as f:
+                cr_content = f.read()
+
+            required_cr_sections = [
+                "1. Чого просять",
+                "2. Ціна зміни",
+                "3. Варіанти дій",
+                "4. Рішення",
+                "5. Що сказати замовнику"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_cr_sections:
+                pos = cr_content.find(sec)
+                if pos == -1:
+                    errors.append(f"change_request.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("change_request.md: Усі 5 обов'язкових розділів присутні у правильному порядку.")
+            else:
+                errors.append("change_request.md: Розділи розташовані не у правильному порядку.")
+
+            # X-18: сувора відповідність рішення в change_request.md та changelog.csv
+            if ch01_decision == "accepted":
+                if not re.search(r"\*\*Рішення\*\*\s*\|\s*`?approve`?", cr_content):
+                    errors.append("X-18: У change_request.md рішення має бути суворо 'approve' (відповідно до accepted у CH-01).")
+                else:
+                    successes.append("X-18: Рішення 'approve' у change_request.md точно узгоджується з 'accepted' у changelog.csv.")
+
+            if "ST-01" not in cr_content:
+                errors.append("X-18: У change_request.md відсутнє посилання на сторону ухвалення рішення (ST-01 з RACI).")
+            else:
+                successes.append("X-18: Сторона ухвалення рішення (ST-01) вказана коректно.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", cr_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"change_request.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("change_request.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні change_request.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -2411,6 +2686,8 @@ if __name__ == "__main__":
             sys.exit(validate_risks_quality(target))
         elif "comm" in target or "raci" in target or "lr12" in target:
             sys.exit(validate_communication(target))
+        elif "status" in target or "impact" in target or "lr15" in target:
+            sys.exit(validate_status_report(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -2433,6 +2710,8 @@ if __name__ == "__main__":
             labs.append(("lr11_risks_quality", validate_risks_quality))
         if os.path.isdir("lr12_communication"):
             labs.append(("lr12_communication", validate_communication))
+        if os.path.isdir("lr15_status_report"):
+            labs.append(("lr15_status_report", validate_status_report))
 
         overall_res = 0
         for ldir, val_fn in labs:
