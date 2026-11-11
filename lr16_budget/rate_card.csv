@@ -1,0 +1,5 @@
+role,fte,hours,rate,source,note
+PM,0.5,240,265,https://dou.ua/lenta/articles/salary-report/,Роль відповідальна за строки й бюджет; коефіцієнт внутрішньої ставки академії до медіани DOU
+Dev,2.0,960,260,https://dou.ua/lenta/articles/salary-report/,Сумарна зайнятість двох розробників (1.0 + 1.0 FTE) за єдиною ставкою
+QA,1.0,480,205,https://dou.ua/lenta/articles/salary-report/,Ставка інженера тестування відповідно до ринкової пропорції команди
+DevOps,0.25,120,320,https://dou.ua/lenta/articles/salary-report/,Спеціалізована інженерна зайнятість (CI/CD та релізна інфраструктура)

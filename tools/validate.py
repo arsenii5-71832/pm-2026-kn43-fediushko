@@ -2961,6 +2961,412 @@ def validate_metrics(target_dir):
         return 0
 
 
+def validate_budget(target_dir):
+    print(f"Початок валідації кошторису, резервів та контрактів у '{target_dir}'...")
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"Помилка: Директорія '{target_dir}' не існує.")
+        return 1
+
+    rate_card_path = os.path.join(target_dir, "rate_card.csv")
+    budget_path = os.path.join(target_dir, "budget.csv")
+    plan_fact_path = os.path.join(target_dir, "plan_fact.csv")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    for req_file, label in [
+        (rate_card_path, "rate_card.csv"),
+        (budget_path, "budget.csv"),
+        (plan_fact_path, "plan_fact.csv"),
+        (readme_path, "README.md"),
+    ]:
+        if not os.path.isfile(req_file):
+            errors.append(f"Відсутній обов'язковий файл '{label}' у {target_dir}.")
+        else:
+            successes.append(f"Файл {label} знайдено в {target_dir}")
+
+    # X-4: читання варіанта та картки з кореневого README.md і бюджетного ліміту з lr05_charter/README.md
+    root_readme_path = "README.md"
+    variant_hours_ceiling = 1800.0
+    variant_weeks = 12
+    variant_direct_limit = 500000.0
+    variant_roles = {"PM", "Dev", "QA", "DevOps"}
+    root_contingency_pct = None
+
+    if os.path.isfile(root_readme_path):
+        try:
+            with open(root_readme_path, mode="r", encoding="utf-8") as f:
+                root_rm = f.read()
+            if "Валюта проєкту:" in root_rm and "[Поки що порожньо]" not in root_rm.split("Валюта проєкту:")[1].splitlines()[0]:
+                successes.append("X-4: Поле 'Валюта проєкту' у кореневому README.md заповнене.")
+            else:
+                errors.append("X-4: Поле 'Валюта проєкту' у кореневому README.md не заповнене.")
+
+            cont_match = re.search(r"Contingency:\*{0,2}\s*([0-9]+(?:[.,][0-9]+)?)\s*%?", root_rm)
+            if cont_match and "[Поки що порожньо]" not in cont_match.group(0):
+                root_contingency_pct = float(cont_match.group(1).replace(",", "."))
+                successes.append(f"X-4: Поле 'Contingency' у кореневому README.md заповнене ({root_contingency_pct:g}%).")
+            else:
+                errors.append("X-4: Поле 'Contingency' у кореневому README.md не заповнене.")
+
+            if "V04" in root_rm and "V08" not in root_rm:
+                variant_hours_ceiling = 720.0
+                variant_weeks = 8
+                variant_direct_limit = 430000.0
+                variant_roles = {"PM", "Dev", "QA"}
+        except Exception as e:
+            errors.append(f"Помилка читання кореневого README.md: {e}")
+
+    charter_readme_path = os.path.join("lr05_charter", "README.md")
+    if os.path.isfile(charter_readme_path):
+        try:
+            with open(charter_readme_path, mode="r", encoding="utf-8") as f:
+                ch_rm = f.read()
+            lim_match = re.search(r"Бюджет direct cost:\s*([0-9\s]+)\s*грн", ch_rm)
+            if lim_match:
+                variant_direct_limit = float(lim_match.group(1).replace(" ", "").strip())
+        except Exception:
+            pass
+
+    # 1. Валідація rate_card.csv (RT-1..3, X-4, X-20)
+    rate_by_role = {}
+    rate_card_hours_sum = 0.0
+    if os.path.isfile(rate_card_path):
+        try:
+            with open(rate_card_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["role", "fte", "hours", "rate", "source", "note"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"RT-1: Некоректний заголовок rate_card.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("RT-1: Заголовок rate_card.csv валідний.")
+                    rates_list = []
+                    labor_total = 0.0
+                    seen_roles = set()
+                    for i, row in enumerate(reader, start=2):
+                        role = row.get("role", "").strip()
+                        fte_s = row.get("fte", "").strip()
+                        hrs_s = row.get("hours", "").strip()
+                        rate_s = row.get("rate", "").strip()
+                        src = row.get("source", "").strip()
+                        note = row.get("note", "").strip()
+                        if not role or not note:
+                            errors.append(f"RT-1 рядок {i}: role та note не можуть бути порожніми.")
+                        seen_roles.add(role)
+                        try:
+                            fte = float(fte_s)
+                            hrs = float(hrs_s)
+                            rate = float(rate_s)
+                            if fte <= 0 or hrs <= 0 or rate <= 0:
+                                errors.append(f"RT-1 рядок {i} ({role}): fte, hours і rate мають бути > 0.")
+                            expected_hrs = fte * variant_weeks * 40
+                            if abs(hrs - expected_hrs) > 0.01:
+                                errors.append(f"X-4 рядок {i} ({role}): hours ({hrs}) != fte*weeks*40 ({expected_hrs}).")
+                            rate_by_role[role] = rate
+                            rates_list.append(rate)
+                            rate_card_hours_sum += hrs
+                            labor_total += hrs * rate
+                        except ValueError:
+                            errors.append(f"RT-1 рядок {i} ({role}): некоректне числове значення fte/hours/rate.")
+
+                        if not re.match(r"^https?://\S+", src):
+                            errors.append(f"RT-3 рядок {i} ({role}): source '{src}' має містити коректний HTTP(S) URL.")
+
+                    if seen_roles == variant_roles:
+                        successes.append(f"X-4: Ролі rate_card.csv {sorted(seen_roles)} точно відповідають варіанту.")
+                    else:
+                        errors.append(f"X-4: Ролі rate_card.csv {sorted(seen_roles)} не збігаються з ролями варіанта {sorted(variant_roles)}.")
+
+                    if abs(rate_card_hours_sum - variant_hours_ceiling) <= 0.01:
+                        successes.append(f"X-4: Сума годин rate_card.csv ({rate_card_hours_sum:g}) точно дорівнює стелі варіанта ({variant_hours_ceiling:g}).")
+                    else:
+                        errors.append(f"X-4: Сума годин rate_card.csv ({rate_card_hours_sum:g}) != стелі ({variant_hours_ceiling:g}).")
+
+                    if len(set(rates_list)) > 1:
+                        successes.append("RT-1: Ставки ролей у rate_card.csv диференційовані (не однакові).")
+                    else:
+                        errors.append("RT-1: Усі ставки у rate_card.csv однакові.")
+
+                    if rate_card_hours_sum > 0:
+                        blended = labor_total / rate_card_hours_sum
+                        own_ceiling = variant_direct_limit / variant_hours_ceiling
+                        if blended <= own_ceiling + 0.01 and blended >= 150.0:
+                            successes.append(f"RT-2: Blended rate ({blended:.2f} грн/год) нижчий за стелю варіанта ({own_ceiling:.2f} грн/год).")
+                        else:
+                            errors.append(f"RT-2: Blended rate ({blended:.2f}) порушує межі (150..{own_ceiling:.2f} грн/год).")
+
+                    if not any("RT-3" in e for e in errors):
+                        successes.append("RT-3: Усі рядки rate_card.csv містять валідне посилання на джерело.")
+        except Exception as e:
+            errors.append(f"Помилка читання rate_card.csv: {e}")
+
+    # 2. Валідація budget.csv (BG-1..7, X-19, X-20)
+    if os.path.isfile(budget_path):
+        try:
+            with open(budget_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["line_id", "category", "role_or_item", "hours", "rate", "amount", "note"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"BG-1: Некоректний заголовок budget.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("BG-1: Заголовок budget.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 6:
+                        successes.append(f"BG-5: Знайдено {len(rows)} рядків кошторису (>= 6).")
+                    else:
+                        errors.append(f"BG-5: Знайдено лише {len(rows)} рядків кошторису (мінімум 6).")
+
+                    direct_sum = 0.0
+                    budget_labor_hours = 0.0
+                    contingency_rows = []
+                    mr_rows = []
+                    non_labor_cats = set()
+
+                    for i, row in enumerate(rows, start=2):
+                        lid = row.get("line_id", "").strip()
+                        cat = row.get("category", "").strip()
+                        item = row.get("role_or_item", "").strip()
+                        hrs_s = row.get("hours", "").strip()
+                        rate_s = row.get("rate", "").strip()
+                        amt_s = row.get("amount", "").strip()
+                        note = row.get("note", "").strip()
+
+                        if not lid or not cat or not item or not note:
+                            errors.append(f"BG-6 рядок {i}: порожнє обов'язкове поле у budget.csv.")
+
+                        try:
+                            amt = float(amt_s)
+                            if amt <= 0:
+                                errors.append(f"BG-6 рядок {i} ({lid}): сума amount ({amt}) має бути > 0.")
+                        except ValueError:
+                            errors.append(f"BG-6 рядок {i} ({lid}): некоректна сума amount '{amt_s}'.")
+                            amt = 0.0
+
+                        if cat == "labor":
+                            try:
+                                hrs = float(hrs_s)
+                                rate = float(rate_s)
+                                if abs(hrs * rate - amt) > 0.01:
+                                    errors.append(f"BG-1 рядок {i} ({lid}): hours ({hrs}) * rate ({rate}) != amount ({amt}).")
+                                if item not in rate_by_role or abs(rate - rate_by_role[item]) > 0.01:
+                                    errors.append(f"X-19 рядок {i} ({lid}): ставка {rate} для '{item}' не збігається з rate_card.csv.")
+                                budget_labor_hours += hrs
+                                direct_sum += amt
+                            except ValueError:
+                                errors.append(f"BG-1 рядок {i} ({lid}): labor-рядок має містити числові hours та rate.")
+                        elif cat == "contingency":
+                            contingency_rows.append(amt)
+                            if hrs_s or rate_s:
+                                errors.append(f"BG-7 рядок {i} ({lid}): резерв contingency не повинен мати заповнені hours/rate.")
+                        elif cat == "management_reserve":
+                            mr_rows.append(amt)
+                            if hrs_s or rate_s:
+                                errors.append(f"BG-7 рядок {i} ({lid}): management_reserve не повинен мати заповнені hours/rate.")
+                        elif cat in ("tools", "infrastructure", "other"):
+                            non_labor_cats.add(cat)
+                            direct_sum += amt
+                        else:
+                            errors.append(f"BG-6 рядок {i} ({lid}): невідома категорія '{cat}'.")
+
+                    if not any("BG-1" in e for e in errors):
+                        successes.append("BG-1: Добуток hours * rate == amount для всіх трудових рядків.")
+                    if not any("X-19" in e for e in errors):
+                        successes.append("X-19: Усі ставки трудових рядків budget.csv строго збігаються з rate_card.csv.")
+
+                    if abs(budget_labor_hours - rate_card_hours_sum) <= 0.01:
+                        successes.append(f"X-20: Сума трудових годин budget.csv ({budget_labor_hours:g}) збігається з rate_card.csv ({rate_card_hours_sum:g}).")
+                    else:
+                        errors.append(f"X-20: Сума трудових годин budget.csv ({budget_labor_hours:g}) != rate_card.csv ({rate_card_hours_sum:g}).")
+
+                    if len(contingency_rows) == 1:
+                        successes.append("BG-2: Присутній рівно 1 рядок contingency.")
+                    else:
+                        errors.append(f"BG-2: Очікується рівно 1 рядок contingency, знайдено {len(contingency_rows)}.")
+
+                    if len(mr_rows) == 1:
+                        successes.append("BG-3: Присутній рівно 1 рядок management_reserve.")
+                    else:
+                        errors.append(f"BG-3: Очікується рівно 1 рядок management_reserve, знайдено {len(mr_rows)}.")
+
+                    if contingency_rows and direct_sum > 0:
+                        cont_pct = (contingency_rows[0] / direct_sum) * 100.0
+                        if 5.0 <= cont_pct <= 25.0:
+                            successes.append(f"BG-4: Contingency становить {cont_pct:.2f}% від прямих витрат ({direct_sum:g} грн).")
+                        else:
+                            errors.append(f"BG-4: Contingency ({cont_pct:.2f}%) виходить за межі 5%..25% від прямих витрат.")
+                        if root_contingency_pct is not None and abs(cont_pct - root_contingency_pct) > 0.5:
+                            errors.append(f"X-4: Відсоток contingency у budget.csv ({cont_pct:.2f}%) != картці README.md ({root_contingency_pct:g}%).")
+
+                    if len(non_labor_cats) >= 2:
+                        successes.append(f"BG-7: Покрито нетрудові прямі витрати {sorted(non_labor_cats)}.")
+                    else:
+                        errors.append(f"BG-7: Недостатньо категорій нетрудових прямих витрат: {sorted(non_labor_cats)}.")
+
+                    if direct_sum <= variant_direct_limit + 0.01:
+                        successes.append(f"BG-6: Сума прямих витрат ({direct_sum:g} грн) <= ліміту варіанта ({variant_direct_limit:g} грн).")
+                    else:
+                        errors.append(f"BG-6: Сума прямих витрат ({direct_sum:g} грн) перевищує ліміт варіанта ({variant_direct_limit:g} грн).")
+        except Exception as e:
+            errors.append(f"Помилка читання budget.csv: {e}")
+
+    # 3. Валідація plan_fact.csv (PF-1..4, X-21)
+    velocity_done_by_sprint = {}
+    vel_path = os.path.join("lr09_forecast", "velocity.csv")
+    if os.path.isfile(vel_path):
+        try:
+            with open(vel_path, mode="r", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    velocity_done_by_sprint[row.get("sprint", "").strip()] = float(row.get("points_done", "0").strip())
+        except Exception:
+            pass
+
+    if os.path.isfile(plan_fact_path):
+        try:
+            with open(plan_fact_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = [
+                    "sprint", "planned_points", "actual_points",
+                    "planned_cost_per_point", "actual_cost_per_point",
+                    "variance_pct", "source_file", "note",
+                ]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"PF-1: Некоректний заголовок plan_fact.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("PF-1: Заголовок plan_fact.csv валідний.")
+                    pf_rows = list(reader)
+                    if len(pf_rows) >= 2:
+                        successes.append(f"PF-1: Знайдено {len(pf_rows)} спринти у plan_fact.csv (>= 2).")
+                    else:
+                        errors.append(f"PF-1: Знайдено лише {len(pf_rows)} рядків у plan_fact.csv (мінімум 2).")
+
+                    planned_pts_vals = set()
+                    planned_cpp_vals = set()
+                    for i, row in enumerate(pf_rows, start=2):
+                        sp = row.get("sprint", "").strip()
+                        src_file = row.get("source_file", "").strip()
+                        try:
+                            p_pts = float(row.get("planned_points", "").strip())
+                            a_pts = float(row.get("actual_points", "").strip())
+                            p_cpp = float(row.get("planned_cost_per_point", "").strip())
+                            a_cpp = float(row.get("actual_cost_per_point", "").strip())
+                            var_pct = float(row.get("variance_pct", "").strip())
+
+                            planned_pts_vals.add(p_pts)
+                            planned_cpp_vals.add(round(p_cpp, 2))
+
+                            sprint_plan_cost = p_pts * p_cpp
+                            sprint_act_cost = a_pts * a_cpp
+                            if abs(sprint_plan_cost - sprint_act_cost) > 1.0:
+                                errors.append(
+                                    f"PF-1 рядок {i} (Спринт {sp}): вартість спринта плану ({sprint_plan_cost:.2f}) != факту ({sprint_act_cost:.2f})."
+                                )
+
+                            expected_var = ((a_cpp - p_cpp) / p_cpp) * 100.0 if p_cpp > 0 else 0.0
+                            if abs(var_pct - expected_var) > 0.05:
+                                errors.append(
+                                    f"PF-2 рядок {i} (Спринт {sp}): variance_pct ({var_pct}) != очікуваного ({expected_var:.2f})."
+                                )
+                            if sp in velocity_done_by_sprint and abs(a_pts - velocity_done_by_sprint[sp]) > 0.01:
+                                errors.append(
+                                    f"X-21 рядок {i} (Спринт {sp}): actual_points ({a_pts:g}) != velocity.csv ({velocity_done_by_sprint[sp]:g})."
+                                )
+                        except ValueError:
+                            errors.append(f"PF-1 рядок {i} (Спринт {sp}): некоректні числові поля у plan_fact.csv.")
+
+                        if not src_file or not os.path.isfile(src_file) or os.path.getsize(src_file) == 0:
+                            errors.append(f"PF-4 рядок {i} (Спринт {sp}): source_file '{src_file}' не існує або порожній.")
+
+                    if len(planned_pts_vals) == 1 and len(planned_cpp_vals) == 1:
+                        successes.append("PF-3: Планова ємність і планова ціна point однакові для всіх спринтів.")
+                    else:
+                        errors.append("PF-3: planned_points або planned_cost_per_point різняться між спринтами.")
+
+                    if not any("PF-1 рядок" in e for e in errors):
+                        successes.append("PF-1: Вартість спринта однакова для плану і факту в межах заокруглення.")
+                    if not any("PF-2" in e for e in errors):
+                        successes.append("PF-2: Усі variance_pct розраховані математично точно.")
+                    if not any("PF-4" in e for e in errors):
+                        successes.append("PF-4: Усі source_file у plan_fact.csv існують і непорожні.")
+                    if velocity_done_by_sprint and not any("X-21" in e for e in errors):
+                        successes.append("X-21: actual_points у plan_fact.csv точно відповідають lr09_forecast/velocity.csv.")
+        except Exception as e:
+            errors.append(f"Помилка читання plan_fact.csv: {e}")
+
+    # 4. Валідація README.md у lr16_budget
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "0. Числа варіанта",
+                "1. Rate card",
+                "2. Кошторис і два резерви",
+                "3. Fixed Price проти Time and Material",
+                "4. Обрана модель",
+                "5. Факт проти плану і прогноз до завершення",
+                "6. Що я перевірив",
+            ]
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+            if order_ok and not any("Відсутній обов'язковий розділ" in e for e in errors):
+                successes.append("README.md: Усі 7 обов'язкових розділів (0..6) присутні у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+            forecast_path = os.path.join("lr09_forecast", "forecast.csv")
+            if os.path.isfile(forecast_path):
+                with open(forecast_path, mode="r", encoding="utf-8-sig") as ff:
+                    fc_rows = list(csv.DictReader(ff))
+                if len(fc_rows) >= 2:
+                    rem_pts = fc_rows[-1].get("remaining_points", "").strip()
+                    if rem_pts and rem_pts in rm_content:
+                        successes.append(f"X-4: Прогноз у README.md використовує актуальний залишок ({rem_pts} points) з forecast.csv.")
+                    elif rem_pts:
+                        errors.append(f"X-4: У README.md відсутнє посилання на залишок '{rem_pts} points' із forecast.csv.")
+        except Exception as e:
+            errors.append(f"Помилка читання README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -2984,6 +3390,8 @@ if __name__ == "__main__":
             sys.exit(validate_metrics(target))
         elif "status" in target or "impact" in target or "lr15" in target:
             sys.exit(validate_status_report(target))
+        elif "budget" in target or "rate" in target or "lr16" in target:
+            sys.exit(validate_budget(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -3010,6 +3418,8 @@ if __name__ == "__main__":
             labs.append(("lr14_metrics", validate_metrics))
         if os.path.isdir("lr15_status_report"):
             labs.append(("lr15_status_report", validate_status_report))
+        if os.path.isdir("lr16_budget"):
+            labs.append(("lr16_budget", validate_budget))
 
         overall_res = 0
         for ldir, val_fn in labs:
