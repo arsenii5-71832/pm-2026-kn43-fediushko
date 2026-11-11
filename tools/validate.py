@@ -3749,6 +3749,112 @@ def validate_ai_assistant(target_dir):
         return 0
 
 
+def validate_closure(target_dir):
+    print(f"Початок валідації фінального звіту про закриття проєкту у '{target_dir}'...")
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"Помилка: Директорія '{target_dir}' не існує.")
+        return 1
+
+    report_path = os.path.join(target_dir, "closure_report.md")
+    if not os.path.isfile(report_path):
+        errors.append(f"Відсутній обов'язковий файл '{report_path}'.")
+    else:
+        successes.append(f"Файл closure_report.md знайдено в {target_dir}")
+
+        try:
+            with open(report_path, mode="r", encoding="utf-8") as f:
+                content = f.read()
+
+            required_sections = [
+                "1. Що прийнято",
+                "2. Що не завершено",
+                "3. Передавання продукту",
+                "4. Отримана цінність",
+                "5. Lessons learned",
+                "6. Три числа, які я поясню на екзамені",
+            ]
+            last_pos = -1
+            order_ok = True
+            for sec in required_sections:
+                pos = content.find(sec)
+                if pos == -1:
+                    errors.append(f"closure_report.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+            if order_ok and not any("Відсутній обов'язковий розділ" in e for e in errors):
+                successes.append("closure_report.md: Усі 6 обов'язкових розділів присутні у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"closure_report.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("closure_report.md: Плейсхолдери у кутових дужках відсутні.")
+
+            if "V08" in content and "1800" in content:
+                successes.append("closure_report.md: Звіт відповідає варіанту V08 (1800 год).")
+            else:
+                errors.append("closure_report.md: Не вказано варіант V08 або стелю годин 1800.")
+
+            for sc in ("SC-01", "SC-02", "SC-03"):
+                if sc not in content:
+                    errors.append(f"closure_report.md: Відсутній критерій успіху '{sc}'.")
+            if not any("критерій успіху" in e for e in errors):
+                successes.append("closure_report.md: Усі 3 критерії успіху (SC-01..SC-03) зафіксовані.")
+
+            if "Дата першого релізу" in content:
+                successes.append("closure_report.md: Таблиця План/Факт містить рядок 'Дата першого релізу'.")
+            else:
+                errors.append("closure_report.md: Відсутній рядок 'Дата першого релізу' у розділі 4.")
+
+            roadmap_path = os.path.join("lr07_wbs", "roadmap.csv")
+            forecast_path = os.path.join("lr09_forecast", "forecast.csv")
+            if os.path.isfile(roadmap_path) and os.path.isfile(forecast_path):
+                with open(roadmap_path, mode="r", encoding="utf-8-sig") as rf:
+                    r_rows = list(csv.DictReader(rf))
+                with open(forecast_path, mode="r", encoding="utf-8-sig") as ff:
+                    f_rows = list(csv.DictReader(ff))
+                rel1_target = r_rows[0].get("target_date", "").strip() if r_rows else ""
+                p85_date = f_rows[-1].get("p85_date", "").strip() if f_rows else ""
+                if rel1_target and rel1_target in content and p85_date and p85_date in content:
+                    successes.append(f"closure_report.md: Дати REL-1 ({rel1_target} проти P85 {p85_date}) узгоджені з roadmap.csv і forecast.csv.")
+                else:
+                    errors.append(f"closure_report.md: Дати REL-1 ({rel1_target} / {p85_date}) не звірені з roadmap.csv і forecast.csv.")
+
+            if "1800" in content and "39" in content and "24" in content:
+                successes.append("closure_report.md: Розділ 6 розкриває наскрізні числа портфеля (1800, 39, 24).")
+            else:
+                errors.append("closure_report.md: У розділі 6 бракує ключових наскрізних чисел (1800, 39, 24).")
+        except Exception as e:
+            errors.append(f"Помилка читання closure_report.md: {e}")
+
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+    for s in successes:
+        print(f"  [OK] {s}")
+    for w in warnings:
+        print(f"  [WARN] {w}")
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -3776,6 +3882,8 @@ if __name__ == "__main__":
             sys.exit(validate_budget(target))
         elif "ai" in target or "assist" in target or "lr17" in target:
             sys.exit(validate_ai_assistant(target))
+        elif "closure" in target or "lr18" in target:
+            sys.exit(validate_closure(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -3806,6 +3914,8 @@ if __name__ == "__main__":
             labs.append(("lr16_budget", validate_budget))
         if os.path.isdir("lr17_ai_assistant"):
             labs.append(("lr17_ai_assistant", validate_ai_assistant))
+        if os.path.isdir("lr18_closure"):
+            labs.append(("lr18_closure", validate_closure))
 
         overall_res = 0
         for ldir, val_fn in labs:
