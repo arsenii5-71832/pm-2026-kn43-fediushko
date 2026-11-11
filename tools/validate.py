@@ -2667,6 +2667,300 @@ def validate_status_report(target_dir):
         return 0
 
 
+def validate_metrics(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    findings_path = os.path.join(target_dir, "findings.csv")
+    flow_path = os.path.join(target_dir, "flow.csv")
+    dash_path = os.path.join(target_dir, "dashboard.csv")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    # 1. Наявність файлів
+    for p, name in [
+        (findings_path, "findings.csv"),
+        (flow_path, "flow.csv"),
+        (dash_path, "dashboard.csv"),
+        (readme_path, "README.md")
+    ]:
+        if not os.path.isfile(p):
+            errors.append(f"Файл {p} не знайдено.")
+        else:
+            successes.append(f"Файл {name} знайдено в {target_dir}")
+
+    # Суміжні файли для X-1, X-2
+    valid_stories = set()
+    backlog_path = os.path.join("lr06_backlog", "backlog.csv")
+    if os.path.isfile(backlog_path):
+        try:
+            with open(backlog_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if row:
+                        valid_stories.add(row[0].strip())
+        except Exception:
+            pass
+
+    valid_stakeholders = set()
+    stakeholders_path = os.path.join("lr05_charter", "stakeholders.csv")
+    if os.path.isfile(stakeholders_path):
+        try:
+            with open(stakeholders_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if row:
+                        valid_stakeholders.add(row[0].strip())
+        except Exception:
+            pass
+
+    forbidden_actions = ["стежити", "моніторити", "аналізувати"]
+
+    # 2. Перевірка findings.csv
+    if os.path.isfile(findings_path):
+        try:
+            with open(findings_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["finding_id", "dataset", "where_seen", "evidence", "diagnosis", "action"]
+                if header != expected_header:
+                    errors.append(f"FD-1: Неправильний заголовок findings.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("FD-1: Заголовок findings.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 6:
+                    errors.append(f"FD-1: findings.csv має містити щонайменше 6 знахідок (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"FD-1: Знайдено {len(rows)} знахідок у findings.csv (>= 6).")
+
+                ds_counts = {"burndown": 0, "cfd": 0, "dora": 0}
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 6:
+                        errors.append(f"findings.csv рядок {i}: очікується 6 колонок, отримано {len(r)}.")
+                        continue
+                    fid, ds, where, ev, diag, act = [c.strip() for c in r]
+                    ds_low = ds.lower()
+                    if ds_low in ds_counts:
+                        ds_counts[ds_low] += 1
+
+                    if not re.search(r"\d", ev):
+                        errors.append(f"FD-2 рядок {i} ({fid}): evidence має містити точні цифри (отримано '{ev}').")
+
+                    act_low = act.lower()
+                    for fa in forbidden_actions:
+                        if fa in act_low:
+                            errors.append(f"FD-3 рядок {i} ({fid}): action містить пасивне слово '{fa}' замість конкретної дії PM.")
+
+                for ds_k, cnt in ds_counts.items():
+                    if cnt < 2:
+                        errors.append(f"FD-1: Для датасету '{ds_k}' потрібно щонайменше 2 знахідки (знайдено {cnt}).")
+                if all(cnt >= 2 for cnt in ds_counts.values()):
+                    successes.append(f"FD-1: Покрито всі 3 датасети мінімум по 2 знахідки {ds_counts}.")
+                if not any("FD-2" in e for e in errors):
+                    successes.append("FD-2: Усі докази (evidence) містять точні числові значення.")
+                if not any("FD-3" in e for e in errors):
+                    successes.append("FD-3: Усі управлінські дії (action) сформульовані активно без пасивних формулювань.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні findings.csv: {e}")
+
+    # 3. Перевірка flow.csv
+    if os.path.isfile(flow_path):
+        try:
+            with open(flow_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["item_id", "story_id", "type", "created_date", "start_date", "done_date", "blocked_days"]
+                if header != expected_header:
+                    errors.append(f"FL-1: Неправильний заголовок flow.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("FL-1: Заголовок flow.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 12:
+                    errors.append(f"FL-1: flow.csv має містити щонайменше 12 карток (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"FL-1: Знайдено {len(rows)} завершених карток (>= 12).")
+
+                no_story_count = 0
+                with_story_count = 0
+                cycle_times = []
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 7:
+                        errors.append(f"flow.csv рядок {i}: очікується 7 колонок, отримано {len(r)}.")
+                        continue
+                    iid, sid, ctype, cr_s, st_s, dn_s, blk_s = [c.strip() for c in r]
+
+                    if not sid:
+                        no_story_count += 1
+                    else:
+                        with_story_count += 1
+                        if valid_stories and sid not in valid_stories:
+                            errors.append(f"X-1 рядок {i} ({iid}): story_id '{sid}' відсутній у lr06_backlog/backlog.csv.")
+
+                    try:
+                        cr_dt = datetime.strptime(cr_s, "%Y-%m-%d").date()
+                        st_dt = datetime.strptime(st_s, "%Y-%m-%d").date()
+                        dn_dt = datetime.strptime(dn_s, "%Y-%m-%d").date()
+
+                        if not (cr_dt <= st_dt <= dn_dt):
+                            errors.append(f"FL-1 рядок {i} ({iid}): порушено порядок дат {cr_s} <= {st_s} <= {dn_s}.")
+
+                        ct = (dn_dt - st_dt).days
+                        cycle_times.append(ct)
+
+                        blk_val = int(blk_s)
+                        if blk_val < 0 or blk_val > ct:
+                            errors.append(f"FL-2 рядок {i} ({iid}): blocked_days ({blk_val}) має бути у [0, {ct}].")
+                    except ValueError as ve:
+                        errors.append(f"flow.csv рядок {i} ({iid}): некоректна дата або blocked_days ({ve}).")
+
+                if no_story_count < 2:
+                    errors.append(f"FL-3: Потрібно щонайменше 2 картки без story_id (знайдено {no_story_count}).")
+                else:
+                    successes.append(f"FL-3: Знайдено {no_story_count} карток без story_id (>= 2).")
+
+                if with_story_count < 2:
+                    errors.append(f"FL-4: Потрібно щонайменше 2 картки зі story_id (знайдено {with_story_count}).")
+                else:
+                    successes.append(f"FL-4: Знайдено {with_story_count} карток зі story_id (>= 2).")
+
+                if cycle_times and (max(cycle_times) - min(cycle_times) >= 3):
+                    successes.append(f"FL-5: Присутній реалістичний розкид cycle time ({min(cycle_times)}..{max(cycle_times)} днів).")
+                else:
+                    errors.append("FL-5: Замалий розкид значень cycle time у flow.csv.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні flow.csv: {e}")
+
+    # 4. Перевірка dashboard.csv
+    if os.path.isfile(dash_path):
+        try:
+            with open(dash_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["metric_id", "metric", "value", "source_file", "reader", "threshold", "decision"]
+                if header != expected_header:
+                    errors.append(f"DB-1: Неправильний заголовок dashboard.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("DB-1: Заголовок dashboard.csv валідний.")
+
+                rows = list(reader)
+                if not (3 <= len(rows) <= 6):
+                    errors.append(f"DB-1: Дашборд має містити 3–4 метрики (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"DB-1: Кількість метрик у дашборді валідна ({len(rows)}).")
+
+                has_flow_source = False
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 7:
+                        errors.append(f"dashboard.csv рядок {i}: очікується 7 колонок, отримано {len(r)}.")
+                        continue
+                    mid, mname, val, src, reader_id, thresh, dec = [c.strip() for c in r]
+
+                    if not re.search(r"\d", val):
+                        errors.append(f"DB-2 рядок {i} ({mid}): value '{val}' повинне містити число або дату.")
+                    if "flow.csv" in src:
+                        has_flow_source = True
+                    if not re.search(r"\d", thresh):
+                        errors.append(f"DB-4 рядок {i} ({mid}): threshold '{thresh}' повинен містити число або дату.")
+
+                    dec_low = dec.lower()
+                    for fa in forbidden_actions:
+                        if fa in dec_low:
+                            errors.append(f"DB-5 рядок {i} ({mid}): decision містить пасивне слово '{fa}'.")
+
+                    if valid_stakeholders and reader_id not in valid_stakeholders:
+                        errors.append(f"X-2 рядок {i} ({mid}): reader '{reader_id}' відсутній у lr05_charter/stakeholders.csv.")
+
+                    if not src or not os.path.isfile(src) or os.path.getsize(src) == 0:
+                        errors.append(f"X-16 рядок {i} ({mid}): файл джерела '{src}' не існує або порожній.")
+
+                if not has_flow_source:
+                    errors.append("DB-3: Дашборд повинен містити принаймні одну метрику з lr14_metrics/flow.csv.")
+                else:
+                    successes.append("DB-3: Присутня метрика на основі flow.csv.")
+
+                if not any("X-16" in e for e in errors):
+                    successes.append("X-16: Усі source_file у dashboard.csv існують і непорожні.")
+                if not any("X-2" in e for e in errors):
+                    successes.append("X-2: Усі reader існують у карті стейкхолдерів.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні dashboard.csv: {e}")
+
+    # 5. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "1. Еталонні дані курсу",
+                "2. Власні числа потоку",
+                "3. Дашборд",
+                "4. Метрика, яку найлегше накрутити"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі 4 обов'язкові розділи присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -2686,6 +2980,8 @@ if __name__ == "__main__":
             sys.exit(validate_risks_quality(target))
         elif "comm" in target or "raci" in target or "lr12" in target:
             sys.exit(validate_communication(target))
+        elif "metric" in target or "flow" in target or "dash" in target or "lr14" in target:
+            sys.exit(validate_metrics(target))
         elif "status" in target or "impact" in target or "lr15" in target:
             sys.exit(validate_status_report(target))
         else:
@@ -2710,6 +3006,8 @@ if __name__ == "__main__":
             labs.append(("lr11_risks_quality", validate_risks_quality))
         if os.path.isdir("lr12_communication"):
             labs.append(("lr12_communication", validate_communication))
+        if os.path.isdir("lr14_metrics"):
+            labs.append(("lr14_metrics", validate_metrics))
         if os.path.isdir("lr15_status_report"):
             labs.append(("lr15_status_report", validate_status_report))
 
