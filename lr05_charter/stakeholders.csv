@@ -5,3 +5,6 @@ ST-03,Студентське самоврядування,студенти,high,
 ST-04,Старости академічних груп,студенти,high,low,blocker,keep_informed,PM
 ST-05,Адміністратор вивантаження розкладу,навчальна частина,low,low,neutral,monitor,Dev
 ST-06,Служба інформаційної безпеки академії,служба безпеки,high,high,neutral,manage_closely,PM
+ST-07,PM (я),академія,high,high,supporter,manage_closely,PM
+ST-08,Dev (розробник),команда розробки,high,low,supporter,keep_informed,PM
+ST-09,QA (інженер з якості),команда розробки,high,low,supporter,keep_informed,PM

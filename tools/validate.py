@@ -2111,6 +2111,287 @@ def validate_risks_quality(target_dir):
         return 0
 
 
+def validate_communication(target_dir):
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"ERROR: Директорія '{target_dir}' не знайдена.")
+        return 1
+
+    raci_path = os.path.join(target_dir, "raci.csv")
+    comm_path = os.path.join(target_dir, "communication.csv")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    # 1. Наявність файлів
+    for p, name in [(raci_path, "raci.csv"), (comm_path, "communication.csv"), (readme_path, "README.md")]:
+        if not os.path.isfile(p):
+            errors.append(f"Файл {p} не знайдено.")
+        else:
+            successes.append(f"Файл {name} знайдено в {target_dir}")
+
+    # Завантаження стейкхолдерів (X-2, CM-1)
+    valid_stakeholders = set()
+    important_stakeholders = set()
+    stakeholders_path = os.path.join("lr05_charter", "stakeholders.csv")
+    if os.path.isfile(stakeholders_path):
+        try:
+            with open(stakeholders_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if len(row) >= 7:
+                        sid = row[0].strip()
+                        strat = row[6].strip().lower()
+                        valid_stakeholders.add(sid)
+                        if strat in ["manage_closely", "keep_satisfied"]:
+                            important_stakeholders.add(sid)
+        except Exception:
+            pass
+
+    # Завантаження WBS вузлів (RC-7)
+    valid_wbs_ids = set()
+    wbs_path = os.path.join("lr07_wbs", "wbs.csv")
+    if os.path.isfile(wbs_path):
+        try:
+            with open(wbs_path, mode="r", encoding="utf-8") as f:
+                r = csv.reader(f)
+                next(r, None)
+                for row in r:
+                    if row:
+                        valid_wbs_ids.add(row[0].strip())
+        except Exception:
+            pass
+
+    # 2. Перевірка raci.csv
+    if os.path.isfile(raci_path):
+        try:
+            with open(raci_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["activity_id", "activity", "wbs_id", "stakeholder_id", "role"]
+                if header != expected_header:
+                    errors.append(f"RC-1: Неправильний заголовок raci.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("RC-1: Заголовок raci.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 18:
+                    errors.append(f"RC-1: raci.csv має містити щонайменше 18 рядків (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"RC-1: Знайдено {len(rows)} рядків у raci.csv (>= 18).")
+
+                allowed_roles = {"R", "A", "AR", "C", "I"}
+                activities = {}
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 5:
+                        errors.append(f"raci.csv рядок {i}: очікується 5 колонок, отримано {len(r)}.")
+                        continue
+                    aid, act_name, wid, sid, role = [c.strip() for c in r]
+
+                    if role not in allowed_roles:
+                        errors.append(f"RC-1 рядок {i}: невідома роль '{role}' (допустимо {allowed_roles}).")
+
+                    if valid_stakeholders and sid not in valid_stakeholders:
+                        errors.append(f"X-2 рядок {i}: stakeholder_id '{sid}' відсутній у lr05_charter/stakeholders.csv.")
+
+                    activities.setdefault(aid, []).append({
+                        "row": i, "activity": act_name, "wbs_id": wid, "sid": sid, "role": role
+                    })
+
+                if len(activities) < 6:
+                    errors.append(f"RC-1: Потрібно щонайменше 6 активностей у RACI (знайдено {len(activities)}).")
+                else:
+                    successes.append(f"RC-1: Знайдено {len(activities)} активностей (>= 6).")
+
+                wbs_activities_count = 0
+                non_wbs_activities_count = 0
+                accountable_owners = set()
+
+                for aid, items in activities.items():
+                    act_texts = {it["activity"] for it in items}
+                    wbs_vals = {it["wbs_id"] for it in items}
+
+                    # RC-4, RC-6
+                    if len(act_texts) > 1:
+                        errors.append(f"RC-4 ({aid}): текст activity має бути однаковим в усіх рядках активності.")
+                    if len(wbs_vals) > 1:
+                        errors.append(f"RC-6 ({aid}): значення wbs_id має бути однаковим в усіх рядках активності.")
+
+                    wid = next(iter(wbs_vals))
+                    if wid:
+                        wbs_activities_count += 1
+                        if valid_wbs_ids and wid not in valid_wbs_ids:
+                            errors.append(f"RC-7 ({aid}): wbs_id '{wid}' не існує у lr07_wbs/wbs.csv.")
+                    else:
+                        non_wbs_activities_count += 1
+
+                    # RC-2, RC-3
+                    a_count = sum(1 for it in items if it["role"] in ("A", "AR"))
+                    r_count = sum(1 for it in items if it["role"] in ("R", "AR"))
+
+                    if a_count != 1:
+                        errors.append(f"RC-2 ({aid}): має бути рівно 1 роль A/AR (знайдено {a_count}).")
+                    if r_count < 1:
+                        errors.append(f"RC-3 ({aid}): має бути щонайменше 1 роль R/AR (знайдено {r_count}).")
+
+                    for it in items:
+                        if it["role"] in ("A", "AR"):
+                            accountable_owners.add(it["sid"])
+
+                if wbs_activities_count < 4:
+                    errors.append(f"RC-7: Щонайменше 4 активності мають посилатися на WBS (знайдено {wbs_activities_count}).")
+                else:
+                    successes.append(f"RC-7: {wbs_activities_count} активностей пов'язано з вузлами WBS (>= 4).")
+
+                if non_wbs_activities_count < 2:
+                    errors.append(f"RC-9: Щонайменше 2 активності мають бути рішеннями поза WBS із порожнім wbs_id (знайдено {non_wbs_activities_count}).")
+                else:
+                    successes.append(f"RC-9: {non_wbs_activities_count} управлінські активності поза WBS (>= 2).")
+
+                if len(accountable_owners) < 2:
+                    errors.append(f"RC-8: Роль A/AR має належати щонайменше 2 різним стейкхолдерам (знайдено {accountable_owners}).")
+                else:
+                    successes.append(f"RC-8: Роль A/AR розподілена між {len(accountable_owners)} різними сторонами ({sorted(accountable_owners)}).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні raci.csv: {e}")
+
+    # 3. Перевірка communication.csv
+    if os.path.isfile(comm_path):
+        try:
+            with open(comm_path, mode="r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                expected_header = ["item_id", "stakeholder_id", "message", "channel", "frequency", "format", "owner"]
+                if header != expected_header:
+                    errors.append(f"CM-1: Неправильний заголовок communication.csv. Очікується:\n{expected_header}\nОтримано:\n{header}")
+                else:
+                    successes.append("CM-1: Заголовок communication.csv валідний.")
+
+                rows = list(reader)
+                if len(rows) < 5:
+                    errors.append(f"CM-1: communication.csv має містити щонайменше 5 рядків (знайдено {len(rows)}).")
+                else:
+                    successes.append(f"CM-1: Знайдено {len(rows)} записів у communication.csv (>= 5).")
+
+                allowed_channels = {"email", "meeting", "chat", "report", "demo", "call"}
+                allowed_freqs = {"daily", "weekly", "biweekly", "monthly", "on_event"}
+                allowed_formats = {"written", "verbal", "dashboard", "presentation"}
+
+                covered_stakeholders = set()
+                has_on_event = False
+                has_regular = False
+
+                for i, r in enumerate(rows, start=2):
+                    if len(r) != 7:
+                        errors.append(f"communication.csv рядок {i}: очікується 7 колонок, отримано {len(r)}.")
+                        continue
+                    cid, sid, msg, ch, freq, fmt, owner = [c.strip() for c in r]
+
+                    if valid_stakeholders and sid not in valid_stakeholders:
+                        errors.append(f"X-2 рядок {i}: stakeholder_id '{sid}' відсутній у lr05_charter/stakeholders.csv.")
+                    covered_stakeholders.add(sid)
+
+                    if ch not in allowed_channels:
+                        errors.append(f"communication.csv рядок {i}: невідомий channel '{ch}'.")
+                    if freq not in allowed_freqs:
+                        errors.append(f"communication.csv рядок {i}: невідома frequency '{freq}'.")
+                    if fmt not in allowed_formats:
+                        errors.append(f"communication.csv рядок {i}: невідомий format '{fmt}'.")
+
+                    if freq == "on_event":
+                        has_on_event = True
+                    if freq in ("weekly", "biweekly"):
+                        has_regular = True
+
+                missing_imp = important_stakeholders - covered_stakeholders
+                if missing_imp:
+                    errors.append(f"CM-1: Важливі стейкхолдери (manage_closely / keep_satisfied) без запису в communication.csv: {missing_imp}")
+                else:
+                    successes.append(f"CM-1: Усі важливі стейкхолдери {sorted(important_stakeholders)} покриті планом комунікацій.")
+
+                if not has_on_event:
+                    errors.append("CM-2: Відсутній щонайменше один запис із frequency='on_event'.")
+                else:
+                    successes.append("CM-2: Присутні подієві комунікації (on_event).")
+
+                if not has_regular:
+                    errors.append("CM-3: Відсутній регулярний ритм комунікацій (weekly або biweekly).")
+                else:
+                    successes.append("CM-3: Присутній регулярний ритм комунікацій (weekly/biweekly).")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні communication.csv: {e}")
+
+    # 4. Перевірка README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "1. Ролі матриці",
+                "2. Матриця RACI",
+                "3. Спірні призначення A",
+                "4. Скільки коштує погодження",
+                "5. План комунікацій",
+                "6. Ризики і комунікації"
+            ]
+
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+
+            if order_ok:
+                successes.append("README.md: Усі 6 обов'язкових розділів присутні у правильному порядку.")
+            else:
+                errors.append("README.md: Розділи розташовані не у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            real_placeholders = [p for p in placeholders if not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Плейсхолдери у кутових дужках відсутні.")
+
+        except Exception as e:
+            errors.append(f"Помилка при читанні README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -2128,6 +2409,8 @@ if __name__ == "__main__":
             sys.exit(validate_review(target))
         elif "risk" in target or "debt" in target or "quality" in target or "lr11" in target:
             sys.exit(validate_risks_quality(target))
+        elif "comm" in target or "raci" in target or "lr12" in target:
+            sys.exit(validate_communication(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -2148,6 +2431,8 @@ if __name__ == "__main__":
             labs.append(("lr10_review", validate_review))
         if os.path.isdir("lr11_risks_quality"):
             labs.append(("lr11_risks_quality", validate_risks_quality))
+        if os.path.isdir("lr12_communication"):
+            labs.append(("lr12_communication", validate_communication))
 
         overall_res = 0
         for ldir, val_fn in labs:
