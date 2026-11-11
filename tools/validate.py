@@ -3367,6 +3367,388 @@ def validate_budget(target_dir):
         return 0
 
 
+def validate_ai_assistant(target_dir):
+    print(f"Початок валідації AI-асистента PM та меж інструмента у '{target_dir}'...")
+    errors = []
+    warnings = []
+    successes = []
+
+    if not os.path.isdir(target_dir):
+        print(f"Помилка: Директорія '{target_dir}' не існує.")
+        return 1
+
+    notes_path = os.path.join(target_dir, "input_notes.md")
+    tasks_path = os.path.join(target_dir, "tasks.csv")
+    prompts_path = os.path.join(target_dir, "prompts.csv")
+    errors_path = os.path.join(target_dir, "errors.csv")
+    time_saved_path = os.path.join(target_dir, "time_saved.csv")
+    policy_path = os.path.join(target_dir, "policy.csv")
+    readme_path = os.path.join(target_dir, "README.md")
+
+    for req_file, label in [
+        (notes_path, "input_notes.md"),
+        (tasks_path, "tasks.csv"),
+        (prompts_path, "prompts.csv"),
+        (errors_path, "errors.csv"),
+        (time_saved_path, "time_saved.csv"),
+        (policy_path, "policy.csv"),
+        (readme_path, "README.md"),
+    ]:
+        if not os.path.isfile(req_file):
+            errors.append(f"Відсутній обов'язковий файл '{label}' у {target_dir}.")
+        else:
+            successes.append(f"Файл {label} знайдено в {target_dir}")
+
+    # 1. Збір тегів N-NN з input_notes.md
+    note_tags = {}
+    if os.path.isfile(notes_path):
+        try:
+            with open(notes_path, mode="r", encoding="utf-8") as f:
+                notes_text = f.read()
+            for line in notes_text.splitlines():
+                m = re.match(r"^\s*-?\s*(N-\d{2}):\s*(.+)$", line)
+                if m:
+                    note_tags[m.group(1)] = m.group(2).strip()
+            if len(note_tags) >= 14:
+                successes.append(f"input_notes.md: Виявлено {len(note_tags)} рядків із тегами N-NN (>= 14).")
+            else:
+                errors.append(f"input_notes.md: Виявлено лише {len(note_tags)} рядків N-NN (очікується >= 14).")
+        except Exception as e:
+            errors.append(f"Помилка читання input_notes.md: {e}")
+
+    # 2. Валідація tasks.csv (TK-1..5, X-22)
+    if os.path.isfile(tasks_path):
+        try:
+            with open(tasks_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["item_id", "source_line", "type", "item", "origin", "owner", "note"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"TK-1: Некоректний заголовок tasks.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("TK-1: Заголовок tasks.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 8:
+                        successes.append(f"TK-1: Знайдено {len(rows)} пунктів у tasks.csv (>= 8).")
+                    else:
+                        errors.append(f"TK-1: Знайдено лише {len(rows)} пунктів у tasks.csv (мінімум 8).")
+
+                    origins = set()
+                    type_counts = {"task": 0, "decision": 0, "open_question": 0}
+                    for i, row in enumerate(rows, start=2):
+                        iid = row.get("item_id", "").strip()
+                        sline = row.get("source_line", "").strip()
+                        itype = row.get("type", "").strip()
+                        item = row.get("item", "").strip()
+                        orig = row.get("origin", "").strip()
+                        owner = row.get("owner", "").strip()
+                        note = row.get("note", "").strip()
+
+                        if not iid or not item:
+                            errors.append(f"TK-1 рядок {i}: порожній item_id або item.")
+                        if note_tags and sline not in note_tags:
+                            errors.append(f"X-22 рядок {i} ({iid}): source_line '{sline}' відсутній у input_notes.md.")
+                        if itype not in type_counts:
+                            errors.append(f"TK-2 рядок {i} ({iid}): невідомий type '{itype}'.")
+                        else:
+                            type_counts[itype] += 1
+                        if orig not in ("mine", "both", "ai"):
+                            errors.append(f"TK-1 рядок {i} ({iid}): некоректне origin '{orig}'.")
+                        else:
+                            origins.add(orig)
+                        if orig in ("mine", "ai") and not note:
+                            errors.append(f"TK-5 рядок {i} ({iid}): поле note обов'язкове для origin='{orig}'.")
+                        if owner:
+                            src_txt = note_tags.get(sline, "").lower()
+                            owner_tokens = [t for t in owner.lower().split() if len(t) > 2]
+                            if not any(t in src_txt for t in owner_tokens):
+                                errors.append(f"TK-4 рядок {i} ({iid}): owner '{owner}' не підтверджений прямо текстом {sline}.")
+
+                    if origins == {"mine", "both", "ai"}:
+                        successes.append("TK-1: Присутні всі три значення origin ('mine', 'both', 'ai').")
+                    else:
+                        errors.append(f"TK-1: Бракує значень origin, наявні лише {sorted(origins)}.")
+
+                    if type_counts["open_question"] >= 2:
+                        successes.append(f"TK-2: Знайдено {type_counts['open_question']} open_question (>= 2).")
+                    else:
+                        errors.append(f"TK-2: Знайдено лише {type_counts['open_question']} open_question (мінімум 2).")
+
+                    if type_counts["task"] >= 2:
+                        successes.append(f"TK-3: Знайдено {type_counts['task']} task (>= 2).")
+                    else:
+                        errors.append(f"TK-3: Знайдено лише {type_counts['task']} task (мінімум 2).")
+
+                    if not any("TK-4" in e for e in errors):
+                        successes.append("TK-4: Поле owner вказано лише там, де особа/роль прямо названа у нотатках.")
+                    if not any("TK-5" in e for e in errors):
+                        successes.append("TK-5: Усі рядки mine/ai містять пояснення відмінностей у note.")
+                    if not any("X-22" in e for e in errors):
+                        successes.append("X-22: Усі source_line у tasks.csv відповідають тегам input_notes.md.")
+        except Exception as e:
+            errors.append(f"Помилка читання tasks.csv: {e}")
+
+    # 3. Валідація prompts.csv (PR-1..6, X-23)
+    valid_run_ids = set()
+    if os.path.isfile(prompts_path):
+        try:
+            with open(prompts_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["run_id", "date", "tool", "goal", "artifact", "has_input", "iterations", "result", "note"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"PR-1: Некоректний заголовок prompts.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("PR-1: Заголовок prompts.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 4:
+                        successes.append(f"PR-1: Знайдено {len(rows)} запусків у prompts.csv (>= 4).")
+                    else:
+                        errors.append(f"PR-1: Знайдено лише {len(rows)} рядків у prompts.csv (мінімум 4).")
+
+                    has_input_yes = 0
+                    iter_ge_2 = 0
+                    other_portfolio_runs = 0
+                    for i, row in enumerate(rows, start=2):
+                        rid = row.get("run_id", "").strip()
+                        art = row.get("artifact", "").strip()
+                        h_in = row.get("has_input", "").strip()
+                        it_s = row.get("iterations", "").strip()
+                        if rid in valid_run_ids:
+                            errors.append(f"PR-1 рядок {i}: дублікат run_id '{rid}'.")
+                        valid_run_ids.add(rid)
+                        if h_in == "yes":
+                            has_input_yes += 1
+                        try:
+                            if int(it_s) >= 2:
+                                iter_ge_2 += 1
+                        except ValueError:
+                            errors.append(f"PR-2 рядок {i} ({rid}): iterations '{it_s}' має бути цілим числом.")
+                        if not art or not (art.endswith(".csv") or art.endswith(".md")) or not os.path.isfile(art) or os.path.getsize(art) == 0:
+                            errors.append(f"PR-3 / X-23 рядок {i} ({rid}): artifact '{art}' має існувати, бути непорожнім та мати розширення .csv/.md.")
+                        elif not art.startswith(f"{target_dir}/"):
+                            other_portfolio_runs += 1
+
+                    if has_input_yes >= 3:
+                        successes.append(f"PR-1: У {has_input_yes} запусках has_input=yes (>= 3).")
+                    else:
+                        errors.append(f"PR-1: Лише {has_input_yes} запусків з has_input=yes (мінімум 3).")
+                    if iter_ge_2 >= 1:
+                        successes.append(f"PR-2: Знайдено {iter_ge_2} ітеративний запуск(и) з iterations >= 2.")
+                    else:
+                        errors.append("PR-2: Відсутній жоден запуск з iterations >= 2.")
+                    if other_portfolio_runs >= 1:
+                        successes.append(f"PR-6 / X-23: Знайдено {other_portfolio_runs} запуски на інших файлах портфеля.")
+                    else:
+                        errors.append("PR-6 / X-23: Відсутній запуск на іншому файлі портфеля поза lr17_ai_assistant.")
+                    if not any("PR-3" in e for e in errors):
+                        successes.append("PR-3: Усі посилання artifact у prompts.csv ведуть на реальні непорожні файли.")
+        except Exception as e:
+            errors.append(f"Помилка читання prompts.csv: {e}")
+
+    # 4. Валідація errors.csv (ER-1..2)
+    if os.path.isfile(errors_path):
+        try:
+            with open(errors_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["error_id", "run_id", "error_type", "what_ai_said", "why_wrong", "how_noticed", "fix"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"ER-1: Некоректний заголовок errors.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("ER-1: Заголовок errors.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 3:
+                        successes.append(f"ER-1: Знайдено {len(rows)} зафіксовані помилки AI (>= 3).")
+                    else:
+                        errors.append(f"ER-1: Знайдено лише {len(rows)} помилок (мінімум 3).")
+                    seen_eids = set()
+                    err_types = set()
+                    for i, row in enumerate(rows, start=2):
+                        eid = row.get("error_id", "").strip()
+                        rid = row.get("run_id", "").strip()
+                        etype = row.get("error_type", "").strip()
+                        what = row.get("what_ai_said", "").strip()
+                        why = row.get("why_wrong", "").strip()
+                        how = row.get("how_noticed", "").strip()
+                        fix = row.get("fix", "").strip()
+                        if eid in seen_eids:
+                            errors.append(f"ER-1 рядок {i}: дублікат error_id '{eid}'.")
+                        seen_eids.add(eid)
+                        if valid_run_ids and rid not in valid_run_ids:
+                            errors.append(f"ER-1 рядок {i} ({eid}): run_id '{rid}' відсутній у prompts.csv.")
+                        err_types.add(etype)
+                        if not what or not why or not how or not fix:
+                            errors.append(f"ER-2 рядок {i} ({eid}): порожнє поле опису або способу виявлення помилки.")
+                    if len(err_types) >= 2:
+                        successes.append(f"ER-1: Покрито різні типи помилок {sorted(err_types)} (>= 2).")
+                    else:
+                        errors.append(f"ER-1: Недостатньо типів помилок: {sorted(err_types)} (мінімум 2).")
+                    if not any("ER-2" in e for e in errors):
+                        successes.append("ER-2: Усі помилки містять конкретні формулювання AI та джерело звірки.")
+        except Exception as e:
+            errors.append(f"Помилка читання errors.csv: {e}")
+
+    # 5. Валідація time_saved.csv (TS-1..4)
+    if os.path.isfile(time_saved_path):
+        try:
+            with open(time_saved_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["case_id", "task", "basis", "minutes_manual", "minutes_ai", "minutes_review", "minutes_saved", "how_measured"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"TS-1: Некоректний заголовок time_saved.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("TS-1: Заголовок time_saved.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 3:
+                        successes.append(f"TS-1: Знайдено {len(rows)} виміряних/оцінених кейсів (>= 3).")
+                    else:
+                        errors.append(f"TS-1: Знайдено лише {len(rows)} кейсів (мінімум 3).")
+                    measured_cnt = 0
+                    negative_cnt = 0
+                    for i, row in enumerate(rows, start=2):
+                        cid = row.get("case_id", "").strip()
+                        basis = row.get("basis", "").strip()
+                        if basis == "measured":
+                            measured_cnt += 1
+                        try:
+                            m_man = float(row.get("minutes_manual", "").strip())
+                            m_ai = float(row.get("minutes_ai", "").strip())
+                            m_rev = float(row.get("minutes_review", "").strip())
+                            m_sav = float(row.get("minutes_saved", "").strip())
+                            if abs((m_man - m_ai - m_rev) - m_sav) > 0.01:
+                                errors.append(f"TS-1 рядок {i} ({cid}): {m_man} - {m_ai} - {m_rev} != {m_sav}.")
+                            if m_rev <= 0:
+                                errors.append(f"TS-3 рядок {i} ({cid}): minutes_review ({m_rev}) має бути > 0.")
+                            if m_sav < 0:
+                                negative_cnt += 1
+                        except ValueError:
+                            errors.append(f"TS-1 рядок {i} ({cid}): некоректні числові поля часу.")
+                    if measured_cnt >= 1:
+                        successes.append(f"TS-2: Присутній реальний хронометраж (basis=measured: {measured_cnt}).")
+                    else:
+                        errors.append("TS-2: Відсутній жоден рядок з basis=measured.")
+                    if not any("TS-3" in e for e in errors):
+                        successes.append("TS-3: Час на перевірку (minutes_review > 0) враховано у кожному кейсі.")
+                    if not any("TS-1 рядок" in e for e in errors):
+                        successes.append("TS-1: Формула minutes_saved = minutes_manual - minutes_ai - minutes_review точна.")
+                    if negative_cnt >= 1:
+                        successes.append(f"TS-4: Враховано чесний негативний кейс ({negative_cnt} з від'ємною економією).")
+        except Exception as e:
+            errors.append(f"Помилка читання time_saved.csv: {e}")
+
+    # 6. Валідація policy.csv (PL-1..4)
+    if os.path.isfile(policy_path):
+        try:
+            with open(policy_path, mode="r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                expected_cols = ["rule_id", "case", "mode", "owner", "check", "why"]
+                if reader.fieldnames != expected_cols:
+                    errors.append(f"PL-1: Некоректний заголовок policy.csv {reader.fieldnames}, очікується {expected_cols}.")
+                else:
+                    successes.append("PL-1: Заголовок policy.csv валідний.")
+                    rows = list(reader)
+                    if len(rows) >= 5:
+                        successes.append(f"PL-1: Знайдено {len(rows)} правил автономії AI (>= 5).")
+                    else:
+                        errors.append(f"PL-1: Знайдено лише {len(rows)} правил (мінімум 5).")
+                    modes = {"forbidden": 0, "draft": 0, "autonomous": 0}
+                    file_mentions = 0
+                    pii_forbidden = False
+                    for i, row in enumerate(rows, start=2):
+                        rid = row.get("rule_id", "").strip()
+                        case = row.get("case", "").strip()
+                        mode = row.get("mode", "").strip()
+                        check = row.get("check", "").strip()
+                        why = row.get("why", "").strip()
+                        if mode not in modes:
+                            errors.append(f"PL-1 рядок {i} ({rid}): невідомий mode '{mode}'.")
+                        else:
+                            modes[mode] += 1
+                        combined = f"{case} {check} {why}".lower()
+                        if ".csv" in combined or ".md" in combined:
+                            file_mentions += 1
+                        if mode == "forbidden" and any(k in combined for k in ("персональн", "конфіденційн", "парол")):
+                            pii_forbidden = True
+
+                    if modes["forbidden"] >= 2 and modes["draft"] >= 2 and modes["autonomous"] >= 1:
+                        successes.append(f"PL-1 / PL-4: Баланс режимів дотримано {modes}.")
+                    else:
+                        errors.append(f"PL-1 / PL-4: Порушено баланс режимів {modes} (потрібно >=2 forbidden, >=2 draft, >=1 autonomous).")
+                    if file_mentions >= 1:
+                        successes.append(f"PL-2: Названо конкретні файли портфеля у правилах ({file_mentions}).")
+                    else:
+                        errors.append("PL-2: Жодне правило політики не посилається на файл портфеля.")
+                    if pii_forbidden:
+                        successes.append("PL-3: Зафіксовано заборону передачі персональних/конфіденційних даних.")
+                    else:
+                        errors.append("PL-3: Відсутня явна заборона передачі персональних даних.")
+        except Exception as e:
+            errors.append(f"Помилка читання policy.csv: {e}")
+
+    # 7. Валідація README.md
+    if os.path.isfile(readme_path):
+        try:
+            with open(readme_path, mode="r", encoding="utf-8") as f:
+                rm_content = f.read()
+
+            required_rm_sections = [
+                "0. Інструмент і вхід",
+                "1. Автоматизований крок",
+                "2. Дві версії одного переліку",
+                "3. Помилки інструмента",
+                "4. Заощаджений час",
+                "5. Правило роботи з AI на моєму проєкті",
+                "6. Промпти",
+            ]
+            last_pos = -1
+            order_ok = True
+            for sec in required_rm_sections:
+                pos = rm_content.find(sec)
+                if pos == -1:
+                    errors.append(f"README.md: Відсутній обов'язковий розділ '{sec}'.")
+                else:
+                    if pos < last_pos:
+                        order_ok = False
+                    last_pos = pos
+            if order_ok and not any("Відсутній обов'язковий розділ" in e for e in errors):
+                successes.append("README.md: Усі 7 обов'язкових розділів (0..6) присутні у правильному порядку.")
+
+            placeholders = re.findall(r"<[^>\n]{2,}>", rm_content)
+            allowed_marker = "<нотатки N-01 ... N-14>"
+            real_placeholders = [
+                p for p in placeholders
+                if p != allowed_marker and not re.match(r"^<(https?://|!--|/?[a-z1-6]+>?)", p, re.IGNORECASE)
+            ]
+            if real_placeholders:
+                errors.append(f"README.md: Виявлено невидалені плейсхолдери у кутових дужках: {real_placeholders[:3]}")
+            else:
+                successes.append("README.md: Неприпустимі плейсхолдери у кутових дужках відсутні.")
+        except Exception as e:
+            errors.append(f"Помилка читання README.md: {e}")
+
+    # Вивід результатів
+    print("=" * 60)
+    print(f"РЕЗУЛЬТАТ ВАЛІДАЦІЇ ДЛЯ '{target_dir}':")
+    print("=" * 60)
+
+    for s in successes:
+        print(f"  [OK] {s}")
+
+    for w in warnings:
+        print(f"  [WARN] {w}")
+
+    if errors:
+        print("-" * 60)
+        print(f"ЗНАЙДЕНО ПОМИЛОК: {len(errors)}")
+        for e in errors:
+            print(f"  [ERROR] {e}")
+        print("=" * 60)
+        return 1
+    else:
+        print("-" * 60)
+        print(" УСІ ПЕРЕВІРКИ УСПІШНО ПРОЙДЕНО! Помилок не виявлено.")
+        print("=" * 60)
+        return 0
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
@@ -3392,6 +3774,8 @@ if __name__ == "__main__":
             sys.exit(validate_status_report(target))
         elif "budget" in target or "rate" in target or "lr16" in target:
             sys.exit(validate_budget(target))
+        elif "ai" in target or "assist" in target or "lr17" in target:
+            sys.exit(validate_ai_assistant(target))
         else:
             sys.exit(validate_case(target))
     else:
@@ -3420,6 +3804,8 @@ if __name__ == "__main__":
             labs.append(("lr15_status_report", validate_status_report))
         if os.path.isdir("lr16_budget"):
             labs.append(("lr16_budget", validate_budget))
+        if os.path.isdir("lr17_ai_assistant"):
+            labs.append(("lr17_ai_assistant", validate_ai_assistant))
 
         overall_res = 0
         for ldir, val_fn in labs:
